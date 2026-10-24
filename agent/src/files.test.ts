@@ -134,7 +134,8 @@ test('creates folders, renames, and deletes to the Recycle Bin', { skip: process
 
   const doomed = join(projects, 'app', 'lib', 'c.ts');
   t.after(() => purgeFromRecycleBin(findInRecycleBin(doomed)));
-  assert.equal((await api('/api/fs/delete', 'POST', { path: 'app/lib/c.ts' })).status, 200);
+  const deleted = await api('/api/fs/delete', 'POST', { path: 'app/lib/c.ts' });
+  assert.equal(deleted.status, 200, deleted.body);
   assert.equal(existsSync(doomed), false);
   assert.equal(findInRecycleBin(doomed).length, 1, 'it went to the Recycle Bin');
   assert.equal((await api('/api/fs/delete', 'POST', { path: 'app/lib/c.ts' })).status, 404);

@@ -76,9 +76,13 @@ export function findInRecycleBin(original: string): BinItem[] {
     }
     for (const name of names.filter((n) => n.startsWith('$I'))) {
       const info = join(bin, sid, name);
-      if (originalPath(readFileSync(info)).toLowerCase() === original.toLowerCase()) {
-        found.push({ info, data: join(bin, sid, '$R' + name.slice(2)) });
+      let data: Buffer;
+      try {
+        data = readFileSync(info);
+      } catch {
+        continue; // emptied from the bin meanwhile (another test, or Explorer)
       }
+      if (originalPath(data).toLowerCase() === original.toLowerCase()) found.push({ info, data: join(bin, sid, '$R' + name.slice(2)) });
     }
   }
   return found;
