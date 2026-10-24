@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+client/dist/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# Environment
+.env*
+
+# Local auth/session data
+auth.json
+auth.json.tmp
+*.session
+
+# Local tooling
+CLAUDE.md
+.claude/
+
+# OS/editor junk
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*~

@@ -1,0 +1,27 @@
+{
+  "name": "pocketide",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "vite build client",
+    "start": "node agent/src/main.ts",
+    "set-password": "node agent/src/main.ts --set-password",
+    "test": "node --test \"agent/src/**/*.test.ts\"",
+    "check": "tsc -p agent && svelte-check --workspace client"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "@types/node": "^24.19.2",
+    "@types/ws": "^8.18.2",
+    "svelte": "^5.57.2",
+    "svelte-check": "^4.7.7",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.5"
+  }
+}
