@@ -3,9 +3,24 @@ import { session } from './session.svelte.ts';
 /** Live link to the agent; reconnects with backoff while the app is open. */
 export const link = $state({ connected: false });
 
+/** `connected` fires on every (re)connect: anything missed while away has to be caught up on. */
+export type AgentEvent = { type: 'connected' } | { type: 'fs'; project: string; paths: string[] | null };
+
 let ws: WebSocket | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
 let attempt = 0;
+const listeners = new Set<(event: AgentEvent) => void>();
+
+export function onEvent(listener: (event: AgentEvent) => void): void {
+  listeners.add(listener);
+}
+
+/** Sends a message if connected; listeners re-send what matters on `connected`. */
+export function send(message: object): void {
+  if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify(message));
+}
+
+const emit = (event: AgentEvent) => listeners.forEach((listener) => listener(event));
 
 export function connect(): void {
   clearTimeout(retryTimer);
@@ -15,7 +30,9 @@ export function connect(): void {
   socket.onopen = () => {
     attempt = 0;
     link.connected = true;
+    emit({ type: 'connected' });
   };
+  socket.onmessage = (e) => emit(JSON.parse(e.data));
   socket.onclose = () => {
     if (ws !== socket) return; // closed on purpose by disconnect()
     ws = undefined;
