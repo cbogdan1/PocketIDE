@@ -145,3 +145,7 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 5. Web preview via reverse proxy (with HMR)
 6. Desktop window capture + window-scoped input (plus the Windows Defender exclusion notes)
 7. Polish: reconnection, performance, landscape split view, notifications, autostart via Task Scheduler
+
+Future ideas:
+
+- Restore deleted files (undo toast + Recently deleted list)
