@@ -1,6 +1,5 @@
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readJsonFile, writeJsonFile } from './store.ts';
 
 export const SESSION_TTL_MS = 30 * 24 * 3600_000;
 
@@ -14,19 +13,8 @@ export type Auth = ReturnType<typeof createAuth>;
 
 /** Password + sessions in one JSON file, re-read on every call so `npm run set-password` applies to a running agent. */
 export function createAuth(file: string) {
-  const read = (): AuthFile => {
-    try {
-      return JSON.parse(readFileSync(file, 'utf8'));
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { sessions: {} };
-      throw err;
-    }
-  };
-  const write = (data: AuthFile) => {
-    mkdirSync(dirname(file), { recursive: true });
-    writeFileSync(file + '.tmp', JSON.stringify(data, null, 2));
-    renameSync(file + '.tmp', file); // atomic swap, so a crash can't leave a half-written file
-  };
+  const read = (): AuthFile => readJsonFile(file, { sessions: {} });
+  const write = (data: AuthFile) => writeJsonFile(file, data);
   const digest = (token: string) => createHash('sha256').update(token).digest('hex');
 
   return {
