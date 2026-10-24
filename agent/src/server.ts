@@ -4,6 +4,7 @@ import { hostname } from 'node:os';
 import { extname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createLimiter, SESSION_TTL_MS, type Auth } from './auth.ts';
+import { json, readJson, toHttpError } from './http.ts';
 import { resolveInside } from './paths.ts';
 
 const COOKIE = '__Host-pocketide';
@@ -36,9 +37,10 @@ export function createApp(auth: Auth, staticDir: string) {
 
   const server = createServer((req, res) => {
     handle(req, res).catch((err) => {
-      console.error(err);
+      const known = toHttpError(err);
+      if (!known) console.error(err);
       if (res.headersSent) res.destroy();
-      else json(res, 500, { error: 'Internal error' });
+      else json(res, known?.status ?? 500, { error: known?.message ?? 'Internal error' });
     });
   });
 
@@ -156,24 +158,4 @@ function sessionToken(req: IncomingMessage): string | undefined {
 
 function cookie(value: string, maxAgeSeconds: number): string {
   return `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAgeSeconds}`;
-}
-
-async function readJson(req: IncomingMessage, limit = 64 * 1024): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of req as AsyncIterable<Buffer>) {
-    size += chunk.length;
-    if (size > limit) return undefined;
-    chunks.push(chunk);
-  }
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
-  } catch {
-    return undefined;
-  }
-}
-
-function json(res: ServerResponse, status: number, body: object) {
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-  res.end(JSON.stringify(body));
 }
