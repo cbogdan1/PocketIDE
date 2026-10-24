@@ -51,6 +51,13 @@ export async function readJson(req: IncomingMessage, limit = 64 * 1024): Promise
   }
 }
 
+/** The request's JSON object body; 400 for anything else. */
+export async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
+  const body = await readJson(req);
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Expected a JSON object');
+  return body as Record<string, unknown>;
+}
+
 export function json(res: ServerResponse, status: number, body: object) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));

@@ -53,7 +53,7 @@ export async function startAgent() {
     async cookie() {
       return (await login('correct horse')).headers['set-cookie']![0].split(';')[0];
     },
-    socket: (headers: Record<string, string>) => new WebSocket(`${origin.replace('http', 'ws')}/ws/events`, { headers }),
+    socket: (headers: Record<string, string>, path = '/ws/events') => new WebSocket(`${origin.replace('http', 'ws')}${path}`, { headers }),
   };
 }
 

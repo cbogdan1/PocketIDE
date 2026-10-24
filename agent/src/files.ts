@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Config, ConfigStore, OpenFiles } from './config.ts';
-import { HttpError, json, readBody, readJson } from './http.ts';
+import { HttpError, json, jsonBody, readBody } from './http.ts';
 import { isValidName, resolveInside, resolveReal } from './paths.ts';
 import { moveToRecycleBin } from './recycle.ts';
 
@@ -187,12 +187,6 @@ const tooLarge = (bytes: number) =>
   new HttpError(413, `Too large for the editor (${(bytes / 1024 / 1024).toFixed(1)} MB; the limit is 2 MB)`);
 
 const invalidName = () => new HttpError(400, 'Names can\'t contain \\ / : * ? " < > | or end with a dot or space');
-
-async function jsonBody(req: IncomingMessage): Promise<Record<string, unknown>> {
-  const body = await readJson(req);
-  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new HttpError(400, 'Expected a JSON object');
-  return body as Record<string, unknown>;
-}
 
 function isOpenFiles(value: unknown): value is Record<string, OpenFiles> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;

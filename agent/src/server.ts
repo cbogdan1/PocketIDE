@@ -8,6 +8,7 @@ import type { ConfigStore } from './config.ts';
 import { createFileRoutes } from './files.ts';
 import { json, readJson, toHttpError } from './http.ts';
 import { resolveInside } from './paths.ts';
+import { createTerminals } from './terminals.ts';
 import { createWatcher } from './watch.ts';
 
 const COOKIE = '__Host-pocketide';
@@ -27,13 +28,27 @@ const MIME: Record<string, string> = {
 export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
   const limiter = createLimiter(5, 15 * 60_000);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  const terminalWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   const watcher = createWatcher(() => config.read().projectsRoot);
-  const routes = createFileRoutes(config, watcher.closeAll);
+  const terminals = createTerminals(config, (event) => {
+    const msg = JSON.stringify(event);
+    for (const ws of wss.clients) ws.send(msg);
+  });
+  const routes: Record<string, (req: IncomingMessage, res: ServerResponse, query: URLSearchParams) => Promise<void>> = {
+    ...createFileRoutes(config, watcher.closeAll),
+    ...terminals.routes,
+  };
 
   // Ping every 30s and drop clients that missed the last pong (phone slept, network changed).
   const alive = new WeakSet<WebSocket>();
+  const track = (ws: WebSocket) => {
+    alive.add(ws);
+    ws.on('pong', () => alive.add(ws));
+    // e.g. a message over maxPayload: ws closes the socket itself (1009), but an unhandled 'error' would crash us.
+    ws.on('error', () => {});
+  };
   const heartbeat = setInterval(() => {
-    for (const ws of wss.clients) {
+    for (const ws of [...wss.clients, ...terminalWss.clients]) {
       if (alive.delete(ws)) ws.ping();
       else ws.terminate();
     }
@@ -116,20 +131,30 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
 
   server.on('upgrade', (req, socket, head) => {
     socket.on('error', () => socket.destroy());
-    const { pathname } = new URL(req.url ?? '/', 'http://x');
+    const { pathname, searchParams } = new URL(req.url ?? '/', 'http://x');
+    const terminalId = pathname === '/ws/terminal' ? (searchParams.get('id') ?? '') : null;
     const status =
       !isAllowedHost(req) || !isSameOrigin(req) ? 403
       : !auth.isValidSession(sessionToken(req)) ? 401
-      : pathname !== '/ws/events' ? 404
-      : 0;
+      : pathname === '/ws/events' || (terminalId !== null && terminals.has(terminalId)) ? 0
+      : 404;
     if (status) {
       socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
       return;
     }
     const token = sessionToken(req);
+    if (terminalId !== null) {
+      let checked = Date.now();
+      // Re-checked at most every 10s (it reads auth.json): a logout elsewhere also ends terminal sockets.
+      const authorized = () => Date.now() - checked < 10_000 || ((checked = Date.now()), auth.isValidSession(token));
+      terminalWss.handleUpgrade(req, socket, head, (ws) => {
+        track(ws);
+        terminals.attach(ws, terminalId, searchParams, authorized);
+      });
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
-      alive.add(ws);
-      ws.on('pong', () => alive.add(ws));
+      track(ws);
       ws.on('message', (data) => {
         // A logout or password change elsewhere ends this socket at its next message.
         if (!auth.isValidSession(token)) return ws.close();
@@ -147,6 +172,7 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
   server.on('close', () => {
     clearInterval(heartbeat);
     watcher.closeAll();
+    terminals.closeAll();
   });
 
   return server;

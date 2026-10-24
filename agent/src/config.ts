@@ -11,6 +11,8 @@ export interface Config {
   lastProject?: string | null;
   /** Editor tabs per project name. */
   openFiles?: Record<string, OpenFiles>;
+  /** Lines of history each terminal keeps for scrolling back and restoring (default 5000). */
+  terminalScrollback?: number;
 }
 
 export type ConfigStore = ReturnType<typeof createConfig>;
