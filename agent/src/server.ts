@@ -4,8 +4,11 @@ import { hostname } from 'node:os';
 import { extname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
 import { createLimiter, SESSION_TTL_MS, type Auth } from './auth.ts';
+import type { ConfigStore } from './config.ts';
+import { createFileRoutes } from './files.ts';
 import { json, readJson, toHttpError } from './http.ts';
 import { resolveInside } from './paths.ts';
+import { createWatcher } from './watch.ts';
 
 const COOKIE = '__Host-pocketide';
 const COOKIE_RE = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`);
@@ -21,9 +24,11 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
-export function createApp(auth: Auth, staticDir: string) {
+export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
   const limiter = createLimiter(5, 15 * 60_000);
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
+  const watcher = createWatcher(() => config.read().projectsRoot);
+  const routes = createFileRoutes(config, watcher.closeAll);
 
   // Ping every 30s and drop clients that missed the last pong (phone slept, network changed).
   const alive = new WeakSet<WebSocket>();
@@ -52,7 +57,7 @@ export function createApp(auth: Auth, staticDir: string) {
     const isRead = req.method === 'GET' || req.method === 'HEAD';
     if (!isRead && !isSameOrigin(req)) return json(res, 403, { error: 'Cross-origin request blocked' });
 
-    const { pathname } = new URL(req.url ?? '/', 'http://x');
+    const { pathname, searchParams } = new URL(req.url ?? '/', 'http://x');
     if (pathname === '/api/login' && req.method === 'POST') return login(req, res);
     if (pathname.startsWith('/api/')) {
       const token = sessionToken(req);
@@ -63,6 +68,8 @@ export function createApp(auth: Auth, staticDir: string) {
         res.setHeader('Set-Cookie', cookie('', 0));
         return json(res, 200, {});
       }
+      const route = routes[`${req.method} ${pathname}`];
+      if (route) return route(req, res, searchParams);
       return json(res, 404, { error: 'Not found' });
     }
     if (isRead) return serveStatic(req, res, pathname);
@@ -119,12 +126,28 @@ export function createApp(auth: Auth, staticDir: string) {
       socket.end(`HTTP/1.1 ${status} ${STATUS_CODES[status]}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
       return;
     }
+    const token = sessionToken(req);
     wss.handleUpgrade(req, socket, head, (ws) => {
       alive.add(ws);
       ws.on('pong', () => alive.add(ws));
+      ws.on('message', (data) => {
+        // A logout or password change elsewhere ends this socket at its next message.
+        if (!auth.isValidSession(token)) return ws.close();
+        let msg: { type?: unknown; project?: unknown };
+        try {
+          msg = JSON.parse(String(data));
+        } catch {
+          return;
+        }
+        if (msg.type === 'watch' && typeof msg.project === 'string') void watcher.subscribe(ws, msg.project);
+      });
+      ws.on('close', () => watcher.unsubscribe(ws));
     });
   });
-  server.on('close', () => clearInterval(heartbeat));
+  server.on('close', () => {
+    clearInterval(heartbeat);
+    watcher.closeAll();
+  });
 
   return server;
 }

@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createAuth } from './auth.ts';
+import { createConfig } from './config.ts';
 import { createApp } from './server.ts';
 
 const PORT = Number(process.env.PORT ?? 7420);
@@ -25,7 +26,7 @@ if (setPasswordOnly || !auth.hasPassword()) {
 if (!existsSync(join(staticDir, 'index.html'))) console.warn('client/dist is missing: run `npm run build` first.');
 
 // Loopback only: the phone reaches it through `tailscale serve`, never directly.
-createApp(auth, staticDir).listen(PORT, '127.0.0.1', () => {
+createApp(auth, createConfig(join(dataDir, 'config.json')), staticDir).listen(PORT, '127.0.0.1', () => {
   console.log(`PocketIDE agent on http://127.0.0.1:${PORT}`);
 });
 
