@@ -470,6 +470,15 @@ export function runCommand(name: 'undo' | 'redo' | 'search'): void {
   if (view) ({ undo, redo, search: openSearchPanel })[name](view);
 }
 
+/** Puts the cursor at a line (and column) of the active file and scrolls it to the middle. */
+export function goTo(lineNumber: number, col = 1): void {
+  if (!view) return;
+  const { doc } = view.state;
+  const line = doc.line(Math.min(Math.max(lineNumber, 1), doc.lines));
+  const pos = Math.min(line.from + Math.max(col - 1, 0), line.to);
+  view.dispatch({ selection: { anchor: pos }, effects: EditorView.scrollIntoView(pos, { y: 'center' }) });
+}
+
 /** A native prompt rather than CodeMirror's panel: iOS reliably shows the keyboard for it. */
 export function goToLine(): void {
   if (!view) return;

@@ -2,14 +2,17 @@
   import { onMount } from 'svelte';
   import Editor from './Editor.svelte';
   import Files from './Files.svelte';
+  import Logs from './Logs.svelte';
   import QuickOpen from './QuickOpen.svelte';
+  import RunBar from './RunBar.svelte';
   import Terminal from './Terminal.svelte';
   import { confirmDiscard, unsavedCount } from './lib/editor.svelte.ts';
   import { unseenCount } from './lib/terminals.svelte.ts';
   import { connect, disconnect, link } from './lib/events.svelte.ts';
+  import { runs } from './lib/runs.svelte.ts';
   import { logout, session } from './lib/session.svelte.ts';
   import { ui, type Tab } from './lib/ui.svelte.ts';
-  import { loadConfig, reset } from './lib/workspace.svelte.ts';
+  import { loadConfig, reset, workspace } from './lib/workspace.svelte.ts';
 
   const tabs: { id: Tab; label: string; milestone: number; icon: string }[] = [
     { id: 'files', label: 'Files', milestone: 2, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' },
@@ -33,8 +36,11 @@
 </script>
 
 <header>
-  <strong>PocketIDE</strong>
-  <span class="link" class:up={link.connected}>{link.connected ? session.host : 'Reconnecting…'}</span>
+  {#if workspace.project}<RunBar />{:else}<strong>PocketIDE</strong>{/if}
+  <!-- With the run controls in the header, the connection is just a dot (the name is in its label). -->
+  <span class="link" class:up={link.connected} class:compact={!!workspace.project} title={link.connected ? session.host : 'Reconnecting…'}>
+    <span class="label">{link.connected ? session.host : 'Reconnecting…'}</span>
+  </span>
   <button class="icon" onclick={logOut} aria-label="Log out">
     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9" /></svg>
   </button>
@@ -50,6 +56,8 @@
         <Editor />
       {:else if tab.id === 'terminal'}
         <Terminal />
+      {:else if tab.id === 'logs'}
+        <Logs />
       {:else}
         <p class="placeholder">{tab.label} arrives in milestone {tab.milestone}.</p>
       {/if}
@@ -71,6 +79,8 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d={tab.icon} /></svg>
         {#if tab.id === 'terminal' && unseenCount()}
           <span class="badge" aria-label="{unseenCount()} with new output">{unseenCount()}</span>
+        {:else if tab.id === 'logs' && runs.unseen}
+          <span class="badge" class:failed={runs.crashed} aria-label="{runs.unseen} finished{runs.crashed ? ', one failed' : ''}">{runs.unseen}</span>
         {/if}
       </span>
       {tab.label}
@@ -108,6 +118,14 @@
   }
   .link.up::before {
     background: var(--accent);
+  }
+  /* Still read out by VoiceOver. */
+  .link.compact .label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
   }
   .icon {
     display: grid;
@@ -191,6 +209,10 @@
     color: #052e16;
     font: 700 11px/16px -apple-system, system-ui, sans-serif;
     text-align: center;
+  }
+  .badge.failed {
+    background: var(--danger);
+    color: #fff;
   }
   .tab-icon.unsaved::after {
     content: '';

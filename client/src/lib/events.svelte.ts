@@ -1,3 +1,4 @@
+import type { LogLine } from './runs.svelte.ts';
 import { session } from './session.svelte.ts';
 
 /** Live link to the agent; reconnects with backoff while the app is open. */
@@ -8,7 +9,9 @@ export type AgentEvent =
   | { type: 'connected' }
   | { type: 'fs'; project: string; paths: string[] | null }
   | { type: 'terminals' }
-  | { type: 'activity'; id: string };
+  | { type: 'activity'; id: string }
+  | { type: 'runs'; project: string }
+  | { type: 'log'; id: string; lines: LogLine[]; clear?: boolean };
 
 let ws: WebSocket | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;
