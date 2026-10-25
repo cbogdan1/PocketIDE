@@ -8,6 +8,7 @@ import type { ConfigStore } from './config.ts';
 import { createFileRoutes } from './files.ts';
 import { json, readJson, toHttpError } from './http.ts';
 import { resolveInside } from './paths.ts';
+import { createRuns } from './runs.ts';
 import { createTerminals } from './terminals.ts';
 import { createWatcher } from './watch.ts';
 
@@ -34,9 +35,14 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
     const msg = JSON.stringify(event);
     for (const ws of wss.clients) ws.send(msg);
   });
+  const runs = createRuns(config, (event) => {
+    const msg = JSON.stringify(event);
+    for (const ws of wss.clients) ws.send(msg);
+  });
   const routes: Record<string, (req: IncomingMessage, res: ServerResponse, query: URLSearchParams) => Promise<void>> = {
     ...createFileRoutes(config, watcher.closeAll),
     ...terminals.routes,
+    ...runs.routes,
   };
 
   // Ping every 30s and drop clients that missed the last pong (phone slept, network changed).
@@ -158,24 +164,29 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
       ws.on('message', (data) => {
         // A logout or password change elsewhere ends this socket at its next message.
         if (!auth.isValidSession(token)) return ws.close();
-        let msg: { type?: unknown; project?: unknown };
+        let msg: { type?: unknown; project?: unknown; id?: unknown };
         try {
           msg = JSON.parse(String(data));
         } catch {
           return;
         }
         if (msg.type === 'watch' && typeof msg.project === 'string') void watcher.subscribe(ws, msg.project);
+        else if (msg.type === 'log') runs.watch(ws, typeof msg.id === 'string' ? msg.id : null);
       });
-      ws.on('close', () => watcher.unsubscribe(ws));
+      ws.on('close', () => {
+        watcher.unsubscribe(ws);
+        runs.unwatch(ws);
+      });
     });
   });
   server.on('close', () => {
     clearInterval(heartbeat);
     watcher.closeAll();
     terminals.closeAll();
+    runs.stopAll();
   });
 
-  return server;
+  return Object.assign(server, { stopRuns: runs.stopAll });
 }
 
 /** Only names the agent is legitimately reached by; blocks DNS-rebinding pages on the PC. */

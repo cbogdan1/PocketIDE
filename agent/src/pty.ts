@@ -25,7 +25,15 @@ export function spawnPty(file: string, args: string[], options: IWindowsPtyForkO
   });
   return {
     proc,
-    // taskkill /T follows parent links, so it also ends detached children that a console-only kill misses.
-    killTree: () => execFile('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { windowsHide: true }, () => {}),
+    killTree: () => void killTree(proc.pid),
   };
+}
+
+/**
+ * Ends a process and everything it started. taskkill /T follows parent links, so it also ends detached children
+ * that a console-only kill misses. Without `force` it only asks: windows get a close message.
+ */
+export function killTree(pid: number, force = true): Promise<void> {
+  const args = ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])];
+  return new Promise((resolve) => execFile('taskkill', args, { windowsHide: true, timeout: 10_000 }, () => resolve()));
 }

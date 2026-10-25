@@ -26,7 +26,11 @@ if (setPasswordOnly || !auth.hasPassword()) {
 if (!existsSync(join(staticDir, 'index.html'))) console.warn('client/dist is missing: run `npm run build` first.');
 
 // Loopback only: the phone reaches it through `tailscale serve`, never directly.
-createApp(auth, createConfig(join(dataDir, 'config.json')), staticDir).listen(PORT, '127.0.0.1', () => {
+const app = createApp(auth, createConfig(join(dataDir, 'config.json')), staticDir);
+// Runs have hidden consoles of their own, so Ctrl+C here doesn't reach them: they're stopped on the way out.
+process.on('exit', app.stopRuns);
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) process.on(signal, () => process.exit(130));
+app.listen(PORT, '127.0.0.1', () => {
   console.log(`PocketIDE agent on http://127.0.0.1:${PORT}`);
 });
 
