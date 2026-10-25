@@ -10,7 +10,7 @@ export interface Shell {
   ctrlLClears: boolean;
 }
 
-const onPath = (exe: string) =>
+export const onPath = (exe: string) =>
   (process.env.PATH ?? '').split(delimiter).map((dir) => join(dir, exe)).find((file) => existsSync(file));
 
 // UTF-8 console output, so programs that print UTF-8 bytes (git, Python) don't show up garbled.
