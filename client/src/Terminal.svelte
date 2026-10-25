@@ -248,6 +248,7 @@
     display: flex;
     flex-direction: column;
     height: 100%;
+    overflow: clip;
   }
   /* The tabs scroll sideways; "+" and "⋯" stay put at the right. */
   .bar {
@@ -334,9 +335,14 @@
     flex: 1;
     min-height: 0;
   }
+  /*
+   * clip, not hidden: iOS scrolls "hidden" boxes to reveal the focused input, which would shift the terminal.
+   * The terminal can be larger than this box while another device sets its size; then its top shows.
+   */
   .host {
     position: absolute;
     inset: 4px 0 0 6px;
+    overflow: clip;
   }
   .host.hidden {
     visibility: hidden;

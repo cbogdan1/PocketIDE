@@ -5,6 +5,7 @@ import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import { TermInput } from './termInput.ts';
 import { chunkInput, type Mods } from './termio.ts';
+import { applyMessage, keepScrolledLines } from './termProtocol.ts';
 
 const THEME = {
   background: '#0d1117',
@@ -37,7 +38,10 @@ interface Callbacks {
   onScrolled(atBottom: boolean): void;
 }
 
-/** One xterm.js for whichever terminal is in front; switching re-attaches and the agent restores the screen. */
+/**
+ * One xterm.js for whichever terminal is in front; switching re-attaches and the agent restores the screen.
+ * Its size always comes from the agent (see termProtocol.ts): the view only proposes what fits its screen.
+ */
 export class TermView {
   readonly term: Terminal;
   readonly input: TermInput;
@@ -48,6 +52,8 @@ export class TermView {
   private attempt = 0;
   private encoder = new TextEncoder();
   private resizeObserver: ResizeObserver;
+  /** What fits this screen; the agent makes it the terminal's size while this device is the active one. */
+  private proposal?: { cols: number; rows: number };
 
   constructor(private host: HTMLElement, fontSize: number, private callbacks: Callbacks) {
     this.term = new Terminal({
@@ -61,21 +67,40 @@ export class TermView {
     this.term.loadAddon(this.fit);
     this.term.loadAddon(new Unicode11Addon()); // same character widths as the agent's mirror
     this.term.unicode.activeVersion = '11';
+    keepScrolledLines(this.term);
     // A tapped link opens in Safari (from the home-screen app too).
     this.term.loadAddon(new WebLinksAddon((_event, uri) => window.open(uri, '_blank', 'noopener')));
     this.term.open(host);
+    // Programs ask the terminal things (what it is, where the cursor is, its colors); the agent's mirror
+    // answers. If every attached device answered too, the extra answers would arrive in the program as input.
+    const quiet = () => true;
+    for (const id of [
+      { final: 'c' },
+      { prefix: '>', final: 'c' },
+      { prefix: '=', final: 'c' },
+      { final: 'n' },
+      { prefix: '?', final: 'n' },
+      { intermediates: '$', final: 'p' },
+      { prefix: '?', intermediates: '$', final: 'p' },
+      { prefix: '>', final: 'q' },
+    ]) {
+      this.term.parser.registerCsiHandler(id, quiet);
+    }
+    this.term.parser.registerDcsHandler({ intermediates: '$', final: 'q' }, quiet);
+    for (const osc of [4, 10, 11, 12]) this.term.parser.registerOscHandler(osc, (data) => data.split(';').includes('?'));
     this.input = new TermInput(this.term, (data) => this.send(data), callbacks.sticky);
-    this.term.onData((data) => this.send(data)); // pastes, and the terminal's replies to queries
-    this.term.onResize(({ cols, rows }) => this.control({ t: 'resize', cols, rows }));
+    this.term.onData((data) => this.send(data)); // pastes, mouse and focus reports
     const scrolled = () => {
       const buffer = this.term.buffer.active;
       callbacks.onScrolled(buffer.viewportY >= buffer.baseY);
     };
     this.term.onScroll(scrolled);
     this.term.onWriteParsed(scrolled);
-    // Rotation and the iOS keyboard resize the host; refit then (the agent hears about it through onResize).
-    this.resizeObserver = new ResizeObserver(() => this.refit());
+    // Rotation, the iOS keyboard and the text size change what fits; touching the terminal makes this device
+    // the active one. Either way the agent decides, and tells every attached device the new size.
+    this.resizeObserver = new ResizeObserver(() => this.propose());
     this.resizeObserver.observe(host);
+    host.addEventListener('pointerdown', () => this.propose(), { passive: true });
     this.touchScroll(host);
   }
 
@@ -121,14 +146,18 @@ export class TermView {
     });
   }
 
-  refit() {
+  /** Tells the agent the size that fits this screen (it also makes this device the active one). */
+  propose() {
     if (!this.host.clientWidth || !this.host.clientHeight) return; // hidden tab
-    this.fit.fit();
+    const fits = this.fit.proposeDimensions();
+    if (!fits || !(fits.cols > 0 && fits.rows > 0)) return;
+    this.proposal = { cols: fits.cols, rows: fits.rows };
+    this.control({ t: 'resize', ...this.proposal });
   }
 
   setFontSize(px: number) {
     this.term.options.fontSize = px;
-    requestAnimationFrame(() => this.refit()); // xterm.js measures the new font when it next renders
+    requestAnimationFrame(() => this.propose()); // xterm.js measures the new font when it next renders
   }
 
   /** Shows terminal `id` (or nothing), replacing whatever was attached. */
@@ -137,41 +166,33 @@ export class TermView {
     this.close();
     this.id = id;
     this.attempt = 0;
-    this.term.reset();
+    // A full reset after whatever is still queued for the previous terminal (reset() would act before it).
+    this.term.write('\x1bc');
     if (id) this.connect();
   }
 
-  /** Reconnects right away (back from the background, or the agent is reachable again). */
-  reconnect() {
-    if (!this.id || this.ws) return;
+  /** Back in front (or the agent is reachable again): reconnect now, or claim the size if still connected. */
+  resume() {
+    if (!this.id) return;
+    if (this.ws) return this.propose();
     this.attempt = 0;
     this.connect();
   }
 
   private connect() {
     clearTimeout(this.retryTimer);
-    this.refit();
-    const { cols, rows } = this.term;
+    this.propose();
+    const { cols, rows } = this.proposal ?? this.term;
     const id = this.id!;
     const url = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/terminal?id=${encodeURIComponent(id)}&cols=${cols}&rows=${rows}`;
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
-    let restoring = false;
     ws.onopen = () => (this.attempt = 0);
     ws.onmessage = (e) => {
-      if (typeof e.data === 'string') {
-        if (JSON.parse(e.data).t === 'restore') restoring = true;
-        return;
-      }
-      const bytes = new Uint8Array(e.data);
-      if (restoring) {
-        // The snapshot replaces everything: screen, scrollback, cursor and modes.
-        this.term.reset();
-        restoring = false;
-      }
+      if (this.ws !== ws) return; // a socket we've replaced: its output belongs to another terminal
       // Acknowledged once rendered, so the agent never runs far ahead of a busy phone.
-      this.term.write(bytes, () => this.control({ t: 'ack', n: bytes.length }, ws));
+      applyMessage(this.term, e.data, (bytes) => this.control({ t: 'ack', n: bytes }, ws));
     };
     ws.onclose = (e) => {
       if (this.ws !== ws) return; // replaced on purpose

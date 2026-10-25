@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import headless from '@xterm/headless';
-import type WebSocket from 'ws';
+import { applyMessage, keepScrolledLines } from '../../client/src/lib/termProtocol.ts';
 import { startAgent } from './testing.ts';
 
 // Terminals need ConPTY.
@@ -46,7 +46,8 @@ async function api(path: string, method = 'GET', body?: object) {
 }
 
 const newTerminal = async (extra: object = {}) => (await api('/api/terminals', 'POST', { cwd: 'app', shell: 'cmd', ...extra })).body;
-const list = async () => (await api('/api/terminals')).body.terminals as { id: string; running: boolean; exitCode: number | null }[];
+const list = async () =>
+  (await api('/api/terminals')).body.terminals as { id: string; running: boolean; exitCode: number | null; cols: number; rows: number }[];
 
 async function waitFor<T>(check: () => T | Promise<T>, what: string, timeout = 15_000): Promise<T> {
   const end = Date.now() + timeout;
@@ -58,30 +59,20 @@ async function waitFor<T>(check: () => T | Promise<T>, what: string, timeout = 1
   }
 }
 
-/** A stand-in for the phone: an xterm that applies restores and acknowledges what it renders. */
+/** A stand-in for the phone: an xterm that follows the agent with the app's own code (termProtocol.ts). */
 async function attach(id: string, cols: number, rows: number, { ack = true } = {}) {
   const ws = agent.socket({ Cookie: cookie, Origin: agent.origin }, `/ws/terminal?id=${id}&cols=${cols}&rows=${rows}`);
-  const term = new headless.Terminal({ cols, rows, scrollback: 5000, allowProposedApi: true });
+  const term = new headless.Terminal({ cols: 80, rows: 24, scrollback: 5000, allowProposedApi: true });
   term.loadAddon(new Unicode11Addon());
   term.unicode.activeVersion = '11';
-  const phone = { ws, term, restores: 0, received: 0, exitCode: null as number | null, ack };
-  let restoring = false;
+  keepScrolledLines(term);
+  const phone = { ws, term, restores: 0, received: 0, lastMessage: Date.now(), exitCode: null as number | null, ack };
   ws.on('message', (data, isBinary) => {
-    if (!isBinary) {
-      const msg = JSON.parse(String(data));
-      if (msg.t === 'restore') {
-        restoring = true;
-        phone.restores++;
-      } else if (msg.t === 'exit') phone.exitCode = msg.code;
-      return;
-    }
-    const buf = data as Buffer;
-    phone.received += buf.length;
-    if (restoring) {
-      term.reset();
-      restoring = false;
-    }
-    term.write(buf, () => phone.ack && ws.send(JSON.stringify({ t: 'ack', n: buf.length })));
+    phone.lastMessage = Date.now();
+    if (isBinary) phone.received += (data as Buffer).length;
+    const msg = applyMessage(term, isBinary ? (data as Buffer) : String(data), (n) => phone.ack && ws.send(JSON.stringify({ t: 'ack', n })));
+    if (msg?.t === 'restore') phone.restores++;
+    else if (msg?.t === 'exit') phone.exitCode = msg.code ?? null;
   });
   await new Promise((resolve, reject) => {
     ws.once('open', resolve);
@@ -103,6 +94,39 @@ async function screen(phone: Phone): Promise<string> {
 }
 
 const type = (phone: Phone, text: string) => phone.ws.send(Buffer.from(text));
+const propose = (phone: Phone, cols: number, rows: number) => phone.ws.send(JSON.stringify({ t: 'resize', cols, rows }));
+
+/** Waits until the agent has been quiet for a moment and everything received is parsed. */
+async function settle(phone: Phone) {
+  await waitFor(() => Date.now() - phone.lastMessage > 600, 'output to settle');
+  await new Promise<void>((r) => phone.term.write('', r));
+}
+
+/** Every line (history and screen) as far as it's visible, the cursor and where the screen starts. */
+function dump(term: Phone['term']) {
+  const b = term.buffer.active;
+  const lines: string[] = [];
+  // Cells past the right edge (left from a wider size) can't be seen; a widening resyncs every client anyway.
+  for (let i = 0; i < b.length; i++) lines.push(b.getLine(i)!.translateToString(true, 0, term.cols).trimEnd());
+  while (lines.length && !lines.at(-1)) lines.pop();
+  return { size: `${term.cols}x${term.rows}`, lines, cursor: `${b.cursorX},${b.baseY + b.cursorY}`, base: b.baseY };
+}
+
+/** The phone must match a fresh client of the agent's mirror (attached at the current size) line for line. */
+async function assertMatchesMirror(phone: Phone, id: string, when: string) {
+  await settle(phone);
+  const { cols, rows } = (await list()).find((t) => t.id === id)!;
+  const observer = await attach(id, cols, rows);
+  await waitFor(() => observer.restores === 1, 'the observer to restore');
+  await settle(observer);
+  const [mine, mirror] = [dump(phone.term), dump(observer.term)];
+  await close(observer);
+  if (JSON.stringify(mine) === JSON.stringify(mirror)) return;
+  const diff = mine.lines
+    .map((line, i) => (line === mirror.lines[i] ? '' : `  line ${i}: phone ${JSON.stringify(line)} / mirror ${JSON.stringify(mirror.lines[i])}`))
+    .filter(Boolean);
+  assert.fail(`${when}: the phone differs from the mirror (${mine.size} vs ${mirror.size}, cursor ${mine.cursor} vs ${mirror.cursor})\n${diff.slice(0, 8).join('\n')}`);
+}
 const close = (phone: Phone) =>
   new Promise((r) => {
     if (phone.ws.readyState === phone.ws.CLOSED) return r(undefined); // e.g. the agent removed the terminal
@@ -211,15 +235,17 @@ test('a client that stops keeping up gets a fresh snapshot instead of the backlo
   await api('/api/terminals/close', 'POST', { id });
 });
 
-test('exited terminals report their exit code and release their console host', windowsOnly, async () => {
-  // Only pseudoconsole hosts: console programs this test runs (powershell, tasklist) get ordinary ones.
-  const filter = `ParentProcessId=${process.pid} and Name='conhost.exe' and CommandLine like '%--headless%'`;
-  const conhosts = () =>
-    execFileSync('powershell.exe', ['-NoProfile', '-Command', `@(Get-CimInstance Win32_Process -Filter "${filter}").Count`]).toString().trim();
+test('exited terminals report their exit code and leave nothing running', windowsOnly, async () => {
+  const hosts = () =>
+    execFileSync('powershell.exe', ['-NoProfile', '-Command',
+      `@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${process.pid} and Name='OpenConsole.exe'").Count`]).toString().trim();
+  // node-pty's reader thread shows up as a MessagePort in this process.
+  const readers = () => process.getActiveResourcesInfo().filter((r) => r === 'MessagePort').length;
   // The terminals of earlier tests are all closed by now, and closing must have released theirs too.
-  await waitFor(() => conhosts() === '0', 'earlier terminals to release their console hosts', 10_000);
+  await waitFor(() => hosts() === '0', 'earlier terminals to release their console hosts', 10_000);
+  const readersBefore = readers();
   const { id } = await newTerminal();
-  await waitFor(() => conhosts() === '1', 'this terminal\'s console host', 10_000);
+  await waitFor(() => hosts() === '1', 'this terminal\'s console host', 10_000);
   const phone = await attach(id, 80, 24);
   await waitFor(async () => (await screen(phone)).includes('>'), 'the prompt');
   type(phone, 'exit 3\r');
@@ -227,7 +253,8 @@ test('exited terminals report their exit code and release their console host', w
   await waitFor(async () => (await screen(phone)).includes('[Process exited with code 3]'), 'the exit line');
   const info = (await list()).find((t) => t.id === id)!;
   assert.deepEqual([info.running, info.exitCode], [false, 3]);
-  await waitFor(() => conhosts() === '0', 'conhost.exe to go away', 5000);
+  await waitFor(() => hosts() === '0', 'OpenConsole.exe to go away', 5000);
+  await waitFor(() => readers() <= readersBefore, 'the reader thread to be released', 5000);
   await close(phone);
   await api('/api/terminals/close', 'POST', { id });
 });
@@ -245,6 +272,76 @@ test('closing a terminal ends its whole process tree', windowsOnly, async () => 
   assert.equal(await gone, 4404, 'attached clients are told the terminal is gone');
   await waitFor(() => pings() === before, 'the background ping to be killed', 5000);
   assert.equal((await list()).some((t) => t.id === id), false);
+});
+
+test('the phone always shows exactly what the mirror has: keyboard, rotation, another device, re-attach', windowsOnly, async () => {
+  const { id } = await newTerminal();
+  let phone = await attach(id, 50, 40);
+  await waitFor(async () => (await screen(phone)).includes('>'), 'the prompt');
+  type(phone, 'for /L %i in (1,1,60) do @echo line %i\r');
+  await waitFor(async () => (await screen(phone)).includes('line 60'), 'the output');
+  const history = () => dump(phone.term).lines.filter((line) => /^line \d+$/.test(line));
+  const all60 = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`);
+
+  // The iOS keyboard opens (fewer rows), something is typed, and it closes again.
+  propose(phone, 50, 16);
+  type(phone, 'echo keyboard-open\r');
+  await waitFor(async () => (await screen(phone)).includes('keyboard-open\n'), 'output with the keyboard open');
+  propose(phone, 50, 40);
+  await assertMatchesMirror(phone, id, 'after the keyboard opened and closed');
+  assert.deepEqual(history(), all60, 'growing the screen must not lose history');
+
+  // Rotation to landscape and back, with a line too long for portrait; then landscape once more, which
+  // brings the cut-off end of that line back into view.
+  propose(phone, 110, 14);
+  type(phone, `echo landscape-${'x'.repeat(70)}\r`);
+  await waitFor(async () => (await screen(phone)).includes('xxxxx\n'), 'output in landscape');
+  propose(phone, 50, 40);
+  await assertMatchesMirror(phone, id, 'after rotating back to portrait');
+  assert.deepEqual(history(), all60, 'rotating must not lose history');
+  propose(phone, 110, 14);
+  await assertMatchesMirror(phone, id, 'after rotating to landscape again');
+  propose(phone, 50, 40);
+  await assertMatchesMirror(phone, id, 'back in portrait');
+
+  // A desktop browser takes over while it types, then leaves; the phone follows, then gets the size back.
+  const pc = await attach(id, 150, 45);
+  type(pc, 'echo from-the-pc\r');
+  await waitFor(() => phone.term.cols === 150 && phone.term.rows === 45, 'the phone to follow the PC size');
+  await waitFor(async () => (await screen(phone)).includes('from-the-pc\n'), 'the PC command on the phone');
+  await assertMatchesMirror(phone, id, 'while the PC sets the size');
+  await close(pc);
+  await waitFor(() => phone.term.cols === 50 && phone.term.rows === 40, 'the size to return to the phone');
+  type(phone, 'echo phone-again\r');
+  await waitFor(async () => (await screen(phone)).includes('phone-again\n'), 'typing on the phone again');
+  await assertMatchesMirror(phone, id, 'after the PC left');
+
+  // Away and back (re-attach): the same screen, and still the same history.
+  await close(phone);
+  phone = await attach(id, 50, 40);
+  await assertMatchesMirror(phone, id, 'after re-attaching');
+  assert.deepEqual(history(), all60);
+  await close(phone);
+  await api('/api/terminals/close', 'POST', { id });
+});
+
+test('lines scrolled off by Enter in the last row stay in the history', windowsOnly, async () => {
+  const { id } = await newTerminal({ shell: 'powershell' });
+  const phone = await attach(id, 100, 12);
+  await waitFor(async () => /PS .*>/.test(await screen(phone)), 'the prompt', 20_000);
+  type(phone, '1..20 | % { "line $_" }\r');
+  await waitFor(async () => (await screen(phone)).includes('line 20\n'), 'the lines');
+  // Every command now starts in the last row, where ConPTY scrolls with CSI S on Enter.
+  for (const word of ['one', 'two', 'three', 'four']) {
+    type(phone, `echo ${word}\r`);
+    await waitFor(async () => (await screen(phone)).includes(`\n${word}\n`), `the output of echo ${word}`);
+  }
+  await settle(phone);
+  const numbered = dump(phone.term).lines.filter((line) => /^line \d+$/.test(line));
+  assert.deepEqual(numbered, Array.from({ length: 20 }, (_, i) => `line ${i + 1}`));
+  await assertMatchesMirror(phone, id, 'after the commands');
+  await close(phone);
+  await api('/api/terminals/close', 'POST', { id });
 });
 
 test('at most 8 terminals; an exited one makes room', windowsOnly, async () => {

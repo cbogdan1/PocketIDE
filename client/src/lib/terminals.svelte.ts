@@ -146,7 +146,7 @@ onEvent((event) => {
   if (event.type === 'connected') {
     // Back online (or back from the background): the list may have changed and the terminal socket is gone.
     void loadTerminals();
-    view?.reconnect();
+    view?.resume();
   } else if (event.type === 'terminals') void loadTerminals();
   else if (event.type === 'activity') {
     const watching = event.id === terms.active && ui.tab === 'terminal' && document.visibilityState === 'visible';
@@ -155,5 +155,5 @@ onEvent((event) => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') view?.reconnect();
+  if (document.visibilityState === 'visible') view?.resume();
 });

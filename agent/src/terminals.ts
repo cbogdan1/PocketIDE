@@ -7,6 +7,7 @@ import { SerializeAddon } from '@xterm/addon-serialize';
 import { Unicode11Addon } from '@xterm/addon-unicode11';
 import headless from '@xterm/headless';
 import type { RawData, WebSocket } from 'ws';
+import { keepScrolledLines } from '../../client/src/lib/termProtocol.ts';
 import type { ConfigStore } from './config.ts';
 import { HttpError, json, jsonBody } from './http.ts';
 import { resolveReal } from './paths.ts';
@@ -24,15 +25,40 @@ const LOW_WATER = 128 << 10;
 const MIRROR_HIGH_WATER = 4 << 20;
 const EXITED_TTL_MS = 60 * 60_000;
 
+/**
+ * Tells xterm.js (the mirror here, and the app's) that ConPTY is on the other end: when the screen grows,
+ * ConPTY adds empty rows at the bottom instead of bringing history back into view, and xterm.js must do the
+ * same or that history gets painted over. The bundled ConPTY (see pty.ts) re-wraps lines on resize like the
+ * one in Windows builds 21376 and later, so xterm.js keeps re-wrapping enabled too.
+ */
+const WINDOWS_PTY = { backend: 'conpty' as const, buildNumber: 21376 };
+
+/**
+ * The serialize addon (0.14) writes "move 0 columns" (ESC[0C, ESC[0D) after a wrapped row that is entirely
+ * blank, but terminals read a count of 0 as 1, so the restored screen kept a stray "-" (the addon's filler).
+ * Escape sequences can't occur inside cell text, so dropping zero-count moves is safe.
+ */
+const ZERO_MOVES = /\x1b\[0[ABCD]/g;
+
+/** Answers for programs that ask the terminal for its colors (Claude Code does, to pick a dark or light theme). */
+const THEME_COLORS: Record<number, string> = { 10: 'e6e6/eded/f3f3', 11: '0d0d/1111/1717', 12: '4a4a/dede/8080' };
+
 type Mirror = InstanceType<typeof headless.Terminal>;
+
+/** Output, or a size change at exactly this point in the output. */
+type Pending = string | { cols: number; rows: number };
 
 interface Client {
   ws: WebSocket;
+  /** The size that fits this client's screen; it becomes the session's size while this client is the active one. */
   cols: number;
   rows: number;
+  lastActive: number;
   /** syncing: waiting for its snapshot (output is held); behind: too slow, output is dropped until a resync. */
   state: 'syncing' | 'live' | 'behind';
-  pending: string[];
+  pending: Pending[];
+  /** Bumped by every resync, so an older snapshot still being prepared is dropped. */
+  syncs: number;
   sent: number;
   acked: number;
   drainTimer?: NodeJS.Timeout;
@@ -54,6 +80,8 @@ interface Session {
   rows: number;
   exitCode: number | null;
   clients: Set<Client>;
+  /** The most recently active client: its size is the session's size. */
+  controller?: Client;
   flushTimer?: NodeJS.Timeout;
   mirrorBacklog: number;
   paused: boolean;
@@ -81,6 +109,8 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
       cwd: s.cwd,
       running: s.exitCode === null,
       exitCode: s.exitCode,
+      cols: s.cols,
+      rows: s.rows,
     };
   }
 
@@ -105,19 +135,19 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
     }
     const cols = clamp(body.cols, 10, 500, 80);
     const rows = clamp(body.rows, 5, 200, 24);
-    const env: Record<string, string> = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<string, string>;
+    const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' } as Record<string, string>;
     // Inherited from whatever terminal started the agent; would mislead programs about where they run.
     delete env.TERM_PROGRAM;
     delete env.TERM_PROGRAM_VERSION;
-    const pty = await spawnPty(shell.file, shell.args, { name: 'xterm-256color', cols, rows, cwd, env });
+    const pty = spawnPty(shell.file, shell.args, { name: 'xterm-256color', cols, rows, cwd, env });
 
     const scrollback = config.read().terminalScrollback ?? DEFAULT_SCROLLBACK;
-    const mirror = new headless.Terminal({ cols, rows, scrollback, allowProposedApi: true });
+    const mirror = new headless.Terminal({ cols, rows, scrollback, allowProposedApi: true, windowsPty: WINDOWS_PTY });
     mirror.loadAddon(new Unicode11Addon()); // same character widths as the phone's xterm.js
     mirror.unicode.activeVersion = '11';
+    keepScrolledLines(mirror);
     const serializer = new SerializeAddon();
     mirror.loadAddon(serializer);
-
     const s: Session = {
       id: randomBytes(9).toString('base64url'),
       shell,
@@ -137,6 +167,18 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
       lastActivity: 0,
     };
     sessions.set(s.id, s);
+
+    // The mirror is the one terminal that answers queries (ConPTY waits for one at startup); the app's
+    // xterm.js stays quiet, or every attached device would answer and the extra answers would arrive as input.
+    const reply = (data: string) => s.exitCode === null && pty.proc.write(data);
+    mirror.onData(reply);
+    for (const [osc, color] of Object.entries(THEME_COLORS)) {
+      mirror.parser.registerOscHandler(Number(osc), (data) => {
+        if (data !== '?') return false;
+        reply(`\x1b]${osc};rgb:${color}\x1b\\`);
+        return true;
+      });
+    }
 
     mirror.onTitleChange((title) => {
       // Shells set the title to their own .exe path; only a program's own name (e.g. a TUI's) is worth showing.
@@ -192,10 +234,24 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
   function sendPending(s: Session, c: Client) {
     if (!c.pending.length) return;
     if (c.sent - c.acked > HIGH_WATER) return fallBehind(s, c);
-    const data = Buffer.from(c.pending.join(''));
+    let text = '';
+    const sendText = () => {
+      if (!text) return;
+      const data = Buffer.from(text);
+      c.sent += data.length;
+      c.ws.send(data);
+      text = '';
+    };
+    for (const item of c.pending) {
+      if (typeof item === 'string') text += item;
+      else {
+        // The client resizes when it reaches this message, after the output before it, like the mirror did.
+        sendText();
+        c.ws.send(JSON.stringify({ t: 'size', cols: item.cols, rows: item.rows }));
+      }
+    }
+    sendText();
     c.pending = [];
-    c.sent += data.length;
-    c.ws.send(data);
   }
 
   /** Drops a slow client's backlog; once it has caught up it gets a snapshot, which is never larger. */
@@ -213,10 +269,14 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
   function sync(s: Session, c: Client) {
     c.state = 'syncing';
     c.pending = []; // already in the mirror, so already in the snapshot
+    const generation = ++c.syncs;
     s.mirror.write('', () => {
-      if (c.ws.readyState !== c.ws.OPEN || !s.clients.has(c)) return;
-      const snapshot = Buffer.from(s.serializer.serialize());
-      c.ws.send(JSON.stringify({ t: 'restore', exitCode: s.exitCode }));
+      if (c.ws.readyState !== c.ws.OPEN || !s.clients.has(c) || generation !== c.syncs) return;
+      // The client takes this size and then a full reset (ESC c), in stream order, so the snapshot replaces
+      // whatever it showed before instead of landing on top of it.
+      const { cols, rows } = s.mirror;
+      c.ws.send(JSON.stringify({ t: 'restore', cols, rows, windowsPty: WINDOWS_PTY, exitCode: s.exitCode }));
+      const snapshot = Buffer.from('\x1bc' + s.serializer.serialize().replace(ZERO_MOVES, ''));
       c.sent += snapshot.length;
       c.ws.send(snapshot);
       c.state = 'live';
@@ -224,13 +284,26 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
     });
   }
 
-  /** The most recently active client sets the session's size. */
+  /**
+   * Changes the size at this point in the output, for the shell, the mirror and every client alike: what was
+   * printed before is laid out at the old size everywhere, what comes after at the new one. Clients never
+   * resize on their own, which is what kept a phone's screen from drifting away from the shell's.
+   */
+  function resize(s: Session, cols: number, rows: number) {
+    if (cols === s.cols && rows === s.rows) return;
+    s.cols = cols;
+    s.rows = rows;
+    if (s.exitCode === null) s.pty.proc.resize(cols, rows);
+    s.mirror.write('', () => s.mirror.resize(cols, rows));
+    for (const c of s.clients) if (c.state !== 'behind') c.pending.push({ cols, rows });
+    flush(s);
+  }
+
+  /** The most recently active client sets the session's size; the others follow it. */
   function activate(s: Session, c: Client) {
-    if (s.exitCode !== null || (c.cols === s.cols && c.rows === s.rows)) return;
-    s.cols = c.cols;
-    s.rows = c.rows;
-    s.pty.proc.resize(c.cols, c.rows);
-    s.mirror.resize(c.cols, c.rows);
+    c.lastActive = Date.now();
+    s.controller = c;
+    resize(s, c.cols, c.rows);
   }
 
   function attach(ws: WebSocket, id: string, query: URLSearchParams, authorized: () => boolean) {
@@ -239,8 +312,10 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
       ws,
       cols: clamp(query.get('cols'), 10, 500, s.cols),
       rows: clamp(query.get('rows'), 5, 200, s.rows),
+      lastActive: 0,
       state: 'syncing',
       pending: [],
+      syncs: 0,
       sent: 0,
       acked: 0,
     };
@@ -264,6 +339,7 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
         return;
       }
       if (msg.t === 'resize') {
+        // What fits the client's screen now (rotation, keyboard, text size); it also counts as being active.
         c.cols = clamp(msg.cols, 10, 500, c.cols);
         c.rows = clamp(msg.rows, 5, 200, c.rows);
         activate(s, c);
@@ -276,6 +352,11 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
     ws.on('close', () => {
       clearInterval(c.drainTimer);
       s.clients.delete(c);
+      if (s.controller !== c) return;
+      // Hand the size back to whoever was active before, e.g. the phone once the PC browser is closed.
+      const next = [...s.clients].sort((a, b) => b.lastActive - a.lastActive)[0];
+      s.controller = next;
+      if (next) resize(s, next.cols, next.rows);
     });
   }
 
