@@ -34,6 +34,7 @@ console.log('pid', process.pid); setInterval(() => {}, 1000);`,
     'many.js': `for (let i = 0; i < ${MAX_LOG_LINES + 2000}; i++) console.log('line ' + i);`,
     'ask.c': `#include <stdio.h>\nint main(void) { int n; printf("Number: "); if (scanf("%d", &n) != 1) return 2; printf("twice is %d\\n", 2 * n); return 0; }\n`,
     'broken.c': `int main(void) { return missing; }\n`,
+    'ask.py': `name = input('Your name: ')\nprint(f'Hi {name}')\n`,
   };
   for (const [name, text] of Object.entries(files)) writeFileSync(join(app, name), text);
 });
@@ -228,9 +229,21 @@ test('Run current file: a C program that reads input, and a compiler error', { s
   assert.equal(missing.status, 404);
 });
 
+test('Run current file: a Python program that reads input', { skip: process.platform !== 'win32' || !has('py') }, async () => {
+  const run = (await api('/api/runs/start', 'POST', { file: 'app/ask.py' })).body as RunInfo;
+  await logMatch(run.id, /Your name: /, 30_000);
+  await api('/api/runs/input', 'POST', { id: run.id, text: 'Ann' });
+  assert.equal((await finished(run.id)).exitCode, 0);
+  assert.match(await text(run.id), /Hi Ann/);
+});
+
 function hasGcc() {
+  return has('gcc');
+}
+
+function has(tool: string) {
   try {
-    execFileSync('where', ['gcc'], { stdio: 'ignore', timeout: 5000 });
+    execFileSync('where', [tool], { stdio: 'ignore', timeout: 5000 });
     return true;
   } catch {
     return false;

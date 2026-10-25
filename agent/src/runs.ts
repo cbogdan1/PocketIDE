@@ -4,7 +4,7 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { WebSocket } from 'ws';
 import type { ConfigStore } from './config.ts';
@@ -112,6 +112,8 @@ interface Run {
   project: string;
   name: string;
   kind: 'config' | 'file';
+  /** The folder it runs in, relative to the projects folder ('/'-separated). */
+  cwd: string;
   type: RunType;
   port?: number;
   command: string;
@@ -171,8 +173,8 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
   }
 
   function info(run: Run) {
-    const { id, project, name, kind, type, port, command, status, exitCode, startedAt, endedAt } = run;
-    return { id, project, name, kind, type, port: port ?? null, command, status, exitCode, startedAt, endedAt };
+    const { id, project, name, kind, cwd, type, port, command, status, exitCode, startedAt, endedAt } = run;
+    return { id, project, name, kind, cwd, type, port: port ?? null, command, status, exitCode, startedAt, endedAt };
   }
 
   const changed = (run: Run) => notify({ type: 'runs', project: run.project });
@@ -211,6 +213,7 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
       PYTHONUTF8: '1',
       ...config.env,
     };
+    const realRoot = (await resolveReal(root(), ''))!;
     const portTaken = config.type === 'web' && config.port ? await listening(config.port) : false;
     // windowsHide gives the program a hidden console of its own (for Ctrl+C); its windows still show normally.
     const child = spawn(file, args, { cwd: spec.cwd, env, windowsHide: true, windowsVerbatimArguments: verbatim, stdio: 'pipe' });
@@ -220,6 +223,7 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
       project: spec.project,
       name: spec.name,
       kind: spec.kind,
+      cwd: relative(realRoot, spec.cwd).replaceAll('\\', '/'),
       type: config.type,
       port: config.port,
       command: config.command,
@@ -240,8 +244,14 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
     run.log.note('info', `▶ ${config.command}`);
     if (portTaken) run.log.note('info', `Something is already listening on port ${config.port}; the app may pick another port.`);
 
-    child.stdout!.setEncoding('utf8').on('data', (text: string) => run.log.write('out', text));
-    child.stderr!.setEncoding('utf8').on('data', (text: string) => run.log.write('err', text));
+    const output = (s: 'out' | 'err') => (text: string) => {
+      run.log.write(s, text);
+      // npm, yarn and pnpm are batch files: after Ctrl+C cmd asks this and waits.
+      // shortcut: English Windows wording only; other languages wait for the forced kill (about 5 s).
+      if (run.stopRequested && text.includes('Terminate batch job (Y/N)?')) child.stdin!.write('Y\r\n');
+    };
+    child.stdout!.setEncoding('utf8').on('data', output('out'));
+    child.stderr!.setEncoding('utf8').on('data', output('err'));
     child.stdin!.on('error', () => {}); // input sent after the program closed it
     child.on('spawn', () => {
       if (run.status !== 'starting') return;
