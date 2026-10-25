@@ -4,7 +4,11 @@ import { session } from './session.svelte.ts';
 export const link = $state({ connected: false });
 
 /** `connected` fires on every (re)connect: anything missed while away has to be caught up on. */
-export type AgentEvent = { type: 'connected' } | { type: 'fs'; project: string; paths: string[] | null };
+export type AgentEvent =
+  | { type: 'connected' }
+  | { type: 'fs'; project: string; paths: string[] | null }
+  | { type: 'terminals' }
+  | { type: 'activity'; id: string };
 
 let ws: WebSocket | undefined;
 let retryTimer: ReturnType<typeof setTimeout> | undefined;

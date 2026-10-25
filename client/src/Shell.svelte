@@ -3,7 +3,9 @@
   import Editor from './Editor.svelte';
   import Files from './Files.svelte';
   import QuickOpen from './QuickOpen.svelte';
+  import Terminal from './Terminal.svelte';
   import { confirmDiscard, unsavedCount } from './lib/editor.svelte.ts';
+  import { unseenCount } from './lib/terminals.svelte.ts';
   import { connect, disconnect, link } from './lib/events.svelte.ts';
   import { logout, session } from './lib/session.svelte.ts';
   import { ui, type Tab } from './lib/ui.svelte.ts';
@@ -46,6 +48,8 @@
         <Files />
       {:else if tab.id === 'editor'}
         <Editor />
+      {:else if tab.id === 'terminal'}
+        <Terminal />
       {:else}
         <p class="placeholder">{tab.label} arrives in milestone {tab.milestone}.</p>
       {/if}
@@ -65,6 +69,9 @@
     >
       <span class="tab-icon" class:unsaved={tab.id === 'editor' && unsavedCount() > 0}>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d={tab.icon} /></svg>
+        {#if tab.id === 'terminal' && unseenCount()}
+          <span class="badge" aria-label="{unseenCount()} with new output">{unseenCount()}</span>
+        {/if}
       </span>
       {tab.label}
     </button>
@@ -160,6 +167,20 @@
   .tab-icon {
     position: relative;
     display: grid;
+  }
+  .badge {
+    position: absolute;
+    top: -4px;
+    right: -10px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    box-sizing: border-box;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #052e16;
+    font: 700 11px/16px -apple-system, system-ui, sans-serif;
+    text-align: center;
   }
   .tab-icon.unsaved::after {
     content: '';

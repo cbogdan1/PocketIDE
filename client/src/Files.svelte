@@ -5,6 +5,7 @@
   import { openFile } from './lib/editor.svelte.ts';
   import { fileBadge } from './lib/fileTypes.ts';
   import { longpress } from './lib/longpress.ts';
+  import { newTerminal } from './lib/terminals.svelte.ts';
   import { openQuickOpen, ui } from './lib/ui.svelte.ts';
   import {
     createEntry,
@@ -80,7 +81,12 @@
       actions: [
         { label: `New file${inside}`, run: () => createEntry(dir, 'file') },
         { label: `New folder${inside}`, run: () => createEntry(dir, 'folder') },
-        ...(row.entry.dir ? [{ label: 'Show only this folder', run: () => showFolder(row.path) }] : []),
+        ...(row.entry.dir
+          ? [
+              { label: 'Open terminal here', run: () => newTerminal(row.path) },
+              { label: 'Show only this folder', run: () => showFolder(row.path) },
+            ]
+          : []),
         { label: 'Rename', run: () => renameEntry(row.path) },
         { label: 'Move to Recycle Bin', danger: true, run: () => deleteEntry(row.path, row.entry.dir) },
       ],
@@ -95,6 +101,7 @@
         { label: 'New file', run: () => createEntry(dir, 'file') },
         { label: 'New folder', run: () => createEntry(dir, 'folder') },
         { label: workspace.showHidden ? 'Hide node_modules, .git, dist…' : 'Show hidden folders', run: () => setShowHidden(!workspace.showHidden) },
+        { label: 'Open terminal here', run: () => newTerminal(dir) },
         { label: 'Refresh', run: () => loadDir(dir) },
       ],
     };
