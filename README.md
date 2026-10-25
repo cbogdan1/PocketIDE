@@ -4,8 +4,9 @@ A self-hosted, mobile-first remote dev environment: it runs on your Windows PC a
 iPhone as an installable web app. You get your project's files, a terminal, Run/Stop, logs and a preview
 of the app you're building, not the whole desktop. It is reachable only inside your Tailscale network.
 
-**Status: milestone 2 of 7.** Login, an installable app shell, a file browser and a code editor that stays in
-sync with changes made on the PC. The Terminal/Preview/Logs tabs are placeholders for now.
+**Status: milestone 3 of 7.** Login, an installable app shell, a file browser, a code editor that stays in
+sync with changes made on the PC, and terminals that keep running while your phone is away (good enough to
+drive Claude Code from the phone). The Preview/Logs tabs are placeholders for now.
 
 ## Features
 
@@ -43,6 +44,27 @@ sync with changes made on the PC. The Terminal/Preview/Logs tabs are placeholder
   the agent refuses the write and the banner appears: someone else's changes are never overwritten silently.
 - When the app comes back from the background (iOS suspends it), it catches up on everything it missed.
 
+**Terminal tab**
+
+- Windows PowerShell (or PowerShell 7 when installed), Command Prompt and Git Bash, in the current project's
+  folder; *Open terminal here* on any folder in the Files tab. UTF-8 output, `TERM=xterm-256color`, true color.
+- Terminals run on the PC, not in the app: they keep going when the phone locks, loses signal or closes the app.
+  When you come back, the screen is restored exactly (colors, cursor, full-screen programs like Claude Code)
+  along with 5,000 lines of scrollback. **Terminals do not survive restarting the agent** (or the PC).
+- Tabs: *+* for a new terminal, long-press a tab to rename or close it. Closing a running terminal asks first and
+  ends everything started in it, child processes included. Up to 8 terminals; a finished one shows its exit code
+  and disappears after an hour. Programs can name their tab (Claude Code does).
+- A dot marks tabs with new output, and the Terminal icon shows how many have some.
+- Extra key row: `Esc Tab ⇧Tab Ctrl Alt ← ↑ ↓ → ⏎ ^C | ~ / \ -` and *Paste*. Ctrl and Alt latch for the next key
+  (tap Ctrl, then type `c`); arrows repeat while held. Esc, ⇧Tab, the arrows and ⏎ drive Claude Code's menus
+  and modes.
+- Typing works with the iOS keyboard's predictive text, autocorrect and dictation without doubled or lost
+  characters; smart quotes and dashes arrive as plain `"` `'` `-`.
+- Drag to scroll back; a button jumps back to the bottom. *⋯ → Select text to copy* shows everything as plain
+  text you can select with the iOS handles. *Paste* reads the clipboard (or offers a field to paste into if iOS
+  refuses). Tapping a link opens it in Safari. Text size is in the *⋯* menu and is remembered per device.
+- Several devices can watch the same terminal; the one used last decides its size.
+
 ## Setup on the PC (Windows 10/11)
 
 Prerequisite: Node.js 22.18 or newer (24 LTS recommended). The agent runs its TypeScript directly, with no
@@ -55,8 +77,13 @@ npm run build      # builds the web client into client/dist
 npm start          # first run asks you to choose a password
 ```
 
+`npm install` warns that `node-pty` has install scripts that were not run. That's expected: it ships prebuilt
+Windows binaries, so neither Python nor Visual Studio Build Tools are needed.
+
 The agent listens on `http://127.0.0.1:7420` (loopback only; change it with the `PORT` env var).
 Your password hash and sessions are stored in `%LOCALAPPDATA%\PocketIDE\auth.json`.
+
+Restarting the agent (Ctrl+C, a reboot, or `npm start` again) ends every terminal and whatever runs in it.
 
 - Change the password: `npm run set-password` (this also logs out every device; it works while the agent is running).
 - Keep the PC awake: set *Settings → System → Power & sleep → Sleep* to *Never* while plugged in.
@@ -103,13 +130,18 @@ iOS closing the app. Save before you leave it for long.
   streams) or NUL are rejected, and every path is resolved with `realpath`, so a symlink or junction inside the
   projects folder can't lead outside it (a dangling one can't be written through either). Choose the projects
   folder with that in mind: everything under it is reachable from your phone.
-- Limits: 2 MB per file read or saved, 64 KB for JSON requests and WebSocket messages.
+- Limits: 2 MB per file read or saved, 64 KB for JSON requests and WebSocket messages (the app splits larger
+  pastes into several messages).
+- Terminal connections pass the same session, `Origin` and `Host` checks. After a logout or password change,
+  an open terminal connection is dropped the next time it's used (checked at most every 10 seconds). A terminal
+  is a full shell on your PC with your user's rights, and it can leave the projects folder like any shell.
 - Settings (projects folder, last project, open tabs) are stored in `%LOCALAPPDATA%\PocketIDE\config.json`.
+  `"terminalScrollback": 5000` there sets how many lines each terminal keeps.
 
 ## Development
 
 ```powershell
-npm test           # node:test: sandboxing (incl. symlink/junction escapes), save conflicts, Recycle Bin, auth, security
+npm test           # node:test: sandboxing, save conflicts, Recycle Bin, terminals (restore, limits, tree kill, paste), auth, security
 npm run check      # tsc (agent) + svelte-check (client)
 ```
 
@@ -119,9 +151,23 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 
 ## Decisions
 
-- **Svelte 5** for the client: a small runtime and simple wiring for imperative widgets (CodeMirror, and later
-  xterm.js and the capture canvas). The app is about 160 KB gzipped, mostly CodeMirror; each language is a
-  separate chunk loaded on first use.
+- **Svelte 5** for the client: a small runtime and simple wiring for imperative widgets (CodeMirror, xterm.js,
+  and later the capture canvas). The app is about 160 KB gzipped, mostly CodeMirror; each language, and
+  xterm.js (about 95 KB), is a separate chunk loaded on first use.
+- **Terminals: `node-pty` 1.1.0 (ConPTY) with a headless xterm.js mirror per terminal.** The mirror sees every
+  byte the shell prints; when the app attaches, the agent sends the mirror's serialized state (screen,
+  scrollback, cursor, modes) instead of replaying raw output, which garbles full-screen programs. `node-pty` is
+  pinned: it leaks a `conhost.exe` whenever a shell exits on its own, so the agent notes which `conhost.exe`
+  each terminal started and ends it afterwards, which relies on node-pty internals. Closing a terminal uses
+  `taskkill /T`, which also catches detached child processes.
+- **Terminal output flow control:** output is batched every 16 ms into binary WebSocket frames, and the app
+  acknowledges what it has drawn. A device more than 1 MB behind gets no more output until it catches up, then
+  a fresh snapshot instead of the backlog. If the mirror itself falls behind, the shell is paused.
+- The phone stays attached only to the terminal on screen; others send small activity events. Switching tabs
+  re-attaches and restores.
+- **Own keyboard handling for xterm.js:** it reads the hidden text field's changes and sends backspaces plus the
+  new text, because xterm.js's own handling duplicates or drops characters when iOS predictive text or dictation
+  rewrites a word. xterm.js has no touch scrolling, so the app adds it.
 - **CodeMirror 6** with `@codemirror/language-data` for languages, `@replit/codemirror-lang-svelte` for Svelte
   (the official set has no Svelte grammar) and `@codemirror/merge` for the conflict diff.
 - **Conflict detection with ETags**: the agent hashes the file on every read and save; a save must name the hash
@@ -140,7 +186,7 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 
 1. ✅ Skeleton: agent, auth, installable PWA over `tailscale serve`
 2. ✅ File browser + editor (live sync with changes on disk)
-3. Terminal (persistent sessions, extra key row)
+3. ✅ Terminal (persistent sessions with exact screen restore, extra key row, works with Claude Code)
 4. Process manager, logs, Run/Stop/Restart, `pocketide.json`
 5. Web preview via reverse proxy (with HMR)
 6. Desktop window capture + window-scoped input (plus the Windows Defender exclusion notes)
