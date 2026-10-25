@@ -6,6 +6,7 @@ import { join, parse } from 'node:path';
 import WebSocket from 'ws';
 import { createAuth } from './auth.ts';
 import { createConfig } from './config.ts';
+import type { PREVIEW_TIMINGS, Tailscale } from './preview.ts';
 import { createApp } from './server.ts';
 
 export interface Reply {
@@ -14,14 +15,17 @@ export interface Reply {
   body: string;
 }
 
-/** Starts an agent on a free port with the password 'correct horse', keeping its data in a fresh temp folder. */
-export async function startAgent() {
+/**
+ * Starts an agent on a free port with the password 'correct horse', keeping its data in a fresh temp folder.
+ * Previews use the given Tailscale stand-in, or none: tests never touch the real tailnet.
+ */
+export async function startAgent(options: { tailscale?: Tailscale; previewTimings?: typeof PREVIEW_TIMINGS } = {}) {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pocketide-')));
   mkdirSync(join(dir, 'static'));
   writeFileSync(join(dir, 'static', 'index.html'), '<h1>PocketIDE</h1>');
   const auth = createAuth(join(dir, 'auth.json')); // sits next to static/, so traversal would expose it
   await auth.setPassword('correct horse');
-  const server = createApp(auth, createConfig(join(dir, 'config.json')), join(dir, 'static'));
+  const server = createApp(auth, createConfig(join(dir, 'config.json')), join(dir, 'static'), { tailscale: null, ...options });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const port = (server.address() as AddressInfo).port;
   const origin = `http://127.0.0.1:${port}`;

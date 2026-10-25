@@ -62,3 +62,20 @@ export function json(res: ServerResponse, status: number, body: object) {
   res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(body));
 }
+
+/** Only names the agent is legitimately reached by; blocks DNS-rebinding pages on the PC. */
+export function isAllowedHost(req: IncomingMessage): boolean {
+  const host = (req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase();
+  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.ts.net');
+}
+
+/** Browsers always send Origin on cross-origin writes and WebSocket handshakes; reject any foreign one. */
+export function isSameOrigin(req: IncomingMessage): boolean {
+  const origin = req.headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === req.headers.host?.toLowerCase();
+  } catch {
+    return false;
+  }
+}

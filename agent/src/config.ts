@@ -13,6 +13,8 @@ export interface Config {
   openFiles?: Record<string, OpenFiles>;
   /** Lines of history each terminal keeps for scrolling back and restoring (default 5000). */
   terminalScrollback?: number;
+  /** Tailnet ports the agent published previews on; any left after a crash are removed at the next start. */
+  previewServe?: number[];
 }
 
 export type ConfigStore = ReturnType<typeof createConfig>;

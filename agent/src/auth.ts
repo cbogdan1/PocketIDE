@@ -1,7 +1,20 @@
 import { createHash, randomBytes, scrypt, timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { readJsonFile, writeJsonFile } from './store.ts';
 
 export const SESSION_TTL_MS = 30 * 24 * 3600_000;
+export const SESSION_COOKIE = '__Host-pocketide';
+const COOKIE_RE = new RegExp(`(?:^|;\\s*)${SESSION_COOKIE}=([^;]+)`);
+
+/** The session token from a request's cookies. */
+export function sessionToken(req: IncomingMessage): string | undefined {
+  return req.headers.cookie?.match(COOKIE_RE)?.[1];
+}
+
+/** Host-only, so browsers also send it to the preview ports of the same host, which check it too. */
+export function sessionCookie(value: string, maxAgeSeconds: number): string {
+  return `${SESSION_COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAgeSeconds}`;
+}
 
 interface AuthFile {
   password?: { salt: string; hash: string };

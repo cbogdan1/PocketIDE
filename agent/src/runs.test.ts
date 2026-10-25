@@ -39,7 +39,7 @@ console.log('pid', process.pid); setInterval(() => {}, 1000);`,
   for (const [name, text] of Object.entries(files)) writeFileSync(join(app, name), text);
 });
 after(() => {
-  agent.server.stopRuns();
+  agent.server.shutdown();
   agent.server.closeAllConnections();
   agent.server.close();
 });

@@ -27,8 +27,9 @@ if (!existsSync(join(staticDir, 'index.html'))) console.warn('client/dist is mis
 
 // Loopback only: the phone reaches it through `tailscale serve`, never directly.
 const app = createApp(auth, createConfig(join(dataDir, 'config.json')), staticDir);
-// Runs have hidden consoles of their own, so Ctrl+C here doesn't reach them: they're stopped on the way out.
-process.on('exit', app.stopRuns);
+// Runs have hidden consoles of their own, so Ctrl+C here doesn't reach them: they're stopped on the way out,
+// and previews leave the tailnet.
+process.on('exit', app.shutdown);
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGBREAK'] as const) process.on(signal, () => process.exit(130));
 app.listen(PORT, '127.0.0.1', () => {
   console.log(`PocketIDE agent on http://127.0.0.1:${PORT}`);

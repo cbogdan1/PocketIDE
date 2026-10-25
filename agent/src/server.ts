@@ -1,19 +1,19 @@
 import { readFile, stat } from 'node:fs/promises';
 import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { hostname } from 'node:os';
 import { extname } from 'node:path';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { createLimiter, SESSION_TTL_MS, type Auth } from './auth.ts';
+import { createLimiter, sessionCookie, sessionToken, SESSION_TTL_MS, type Auth } from './auth.ts';
 import type { ConfigStore } from './config.ts';
 import { createFileRoutes } from './files.ts';
-import { json, readJson, toHttpError } from './http.ts';
+import { isAllowedHost, isSameOrigin, json, readJson, toHttpError } from './http.ts';
 import { resolveInside } from './paths.ts';
+import { createPreviews, findTailscale, type PREVIEW_TIMINGS, type Tailscale } from './preview.ts';
 import { createRuns } from './runs.ts';
 import { createTerminals } from './terminals.ts';
 import { createWatcher } from './watch.ts';
 
-const COOKIE = '__Host-pocketide';
-const COOKIE_RE = new RegExp(`(?:^|;\\s*)${COOKIE}=([^;]+)`);
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -26,7 +26,13 @@ const MIME: Record<string, string> = {
   '.woff2': 'font/woff2',
 };
 
-export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
+/** Tests pass a stand-in for the Tailscale CLI (found on the PC by default) and shorter preview timings. */
+export function createApp(
+  auth: Auth,
+  config: ConfigStore,
+  staticDir: string,
+  { tailscale = findTailscale(), previewTimings }: { tailscale?: Tailscale; previewTimings?: typeof PREVIEW_TIMINGS } = {},
+) {
   const limiter = createLimiter(5, 15 * 60_000);
   const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
   const terminalWss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 });
@@ -39,10 +45,12 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
     const msg = JSON.stringify(event);
     for (const ws of wss.clients) ws.send(msg);
   });
+  const previews = createPreviews({ auth, config, runs, tailscale, timings: previewTimings, agentPort: () => (server.address() as AddressInfo | null)?.port });
   const routes: Record<string, (req: IncomingMessage, res: ServerResponse, query: URLSearchParams) => Promise<void>> = {
     ...createFileRoutes(config, watcher.closeAll),
     ...terminals.routes,
     ...runs.routes,
+    ...previews.routes,
   };
 
   // Ping every 30s and drop clients that missed the last pong (phone slept, network changed).
@@ -86,7 +94,7 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
       if (pathname === '/api/session' && isRead) return json(res, 200, { host: hostname() });
       if (pathname === '/api/logout' && req.method === 'POST') {
         auth.deleteSession(token);
-        res.setHeader('Set-Cookie', cookie('', 0));
+        res.setHeader('Set-Cookie', sessionCookie('', 0));
         return json(res, 200, {});
       }
       const route = routes[`${req.method} ${pathname}`];
@@ -111,7 +119,7 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
       return json(res, 401, { error: 'Wrong password' });
     }
     limiter.reset(ip);
-    res.setHeader('Set-Cookie', cookie(auth.createSession(), SESSION_TTL_MS / 1000));
+    res.setHeader('Set-Cookie', sessionCookie(auth.createSession(), SESSION_TTL_MS / 1000));
     json(res, 200, {});
   }
 
@@ -183,39 +191,20 @@ export function createApp(auth: Auth, config: ConfigStore, staticDir: string) {
     clearInterval(heartbeat);
     watcher.closeAll();
     terminals.closeAll();
-    runs.stopAll();
+    shutdown();
   });
 
-  return Object.assign(server, { stopRuns: runs.stopAll });
-}
-
-/** Only names the agent is legitimately reached by; blocks DNS-rebinding pages on the PC. */
-function isAllowedHost(req: IncomingMessage): boolean {
-  const host = (req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase();
-  return host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host.endsWith('.ts.net');
-}
-
-/** Browsers always send Origin on cross-origin writes and WebSocket handshakes; reject any foreign one. */
-function isSameOrigin(req: IncomingMessage): boolean {
-  const origin = req.headers.origin;
-  if (!origin) return true;
-  try {
-    return new URL(origin).host === req.headers.host?.toLowerCase();
-  } catch {
-    return false;
+  /** Synchronous, so it also works while the agent is exiting: stops runs, closes previews and their serve entries. */
+  function shutdown() {
+    runs.stopAll();
+    previews.shutdown();
   }
+
+  return Object.assign(server, { shutdown });
 }
 
 /** tailscale serve appends the real client address to X-Forwarded-For; the socket peer is always loopback. */
 function clientIp(req: IncomingMessage): string {
   const forwarded = String(req.headers['x-forwarded-for'] ?? '').split(',').pop()!.trim();
   return forwarded || req.socket.remoteAddress || '';
-}
-
-function sessionToken(req: IncomingMessage): string | undefined {
-  return req.headers.cookie?.match(COOKIE_RE)?.[1];
-}
-
-function cookie(value: string, maxAgeSeconds: number): string {
-  return `${COOKIE}=${value}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAgeSeconds}`;
 }
