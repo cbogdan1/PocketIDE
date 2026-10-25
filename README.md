@@ -63,7 +63,11 @@ drive Claude Code from the phone). The Preview/Logs tabs are placeholders for no
 - Drag to scroll back; a button jumps back to the bottom. *⋯ → Select text to copy* shows everything as plain
   text you can select with the iOS handles. *Paste* reads the clipboard (or offers a field to paste into if iOS
   refuses). Tapping a link opens it in Safari. Text size is in the *⋯* menu and is remembered per device.
-- Several devices can watch the same terminal; the one used last decides its size.
+- `clear` / `cls` also clear the history, as in VS Code; so does *⋯ → Clear terminal* (in PowerShell and Git
+  Bash it sends Ctrl+L, so it works inside programs like Claude Code too).
+- Several devices can watch the same terminal; the one used last decides its size, and every device shows the
+  same screen at that size. Rotating, the keyboard and switching tabs don't duplicate or lose lines.
+- While the keyboard is up, the app's header is hidden to give the terminal more rows.
 
 ## Setup on the PC (Windows 10/11)
 
@@ -113,6 +117,9 @@ Never use `tailscale funnel` for PocketIDE: that exposes it to the public intern
 4. Recommended for coding: *Settings → General → Keyboard → Smart Punctuation* off, so the iOS keyboard types
    straight quotes. (The coding-key row always inserts straight `"` and `'`.)
 
+The bar with ˄ ˅ ✓ above the iOS keyboard can't be removed: iOS gives web apps (home-screen apps included) no
+way to hide it, only apps wrapped in a native shell can.
+
 Unsaved edits live in the app's memory: they survive switching apps and short trips to the background, but not
 iOS closing the app. Save before you leave it for long.
 
@@ -154,12 +161,26 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 - **Svelte 5** for the client: a small runtime and simple wiring for imperative widgets (CodeMirror, xterm.js,
   and later the capture canvas). The app is about 160 KB gzipped, mostly CodeMirror; each language, and
   xterm.js (about 95 KB), is a separate chunk loaded on first use.
-- **Terminals: `node-pty` 1.1.0 (ConPTY) with a headless xterm.js mirror per terminal.** The mirror sees every
-  byte the shell prints; when the app attaches, the agent sends the mirror's serialized state (screen,
-  scrollback, cursor, modes) instead of replaying raw output, which garbles full-screen programs. `node-pty` is
-  pinned: it leaks a `conhost.exe` whenever a shell exits on its own, so the agent notes which `conhost.exe`
-  each terminal started and ends it afterwards, which relies on node-pty internals. Closing a terminal uses
+- **Terminals: `node-pty` 1.1.0 with a headless xterm.js mirror per terminal.** The mirror sees every byte the
+  shell prints; when the app attaches, the agent sends the mirror's serialized state (screen, scrollback,
+  cursor, modes) instead of replaying raw output, which garbles full-screen programs. Closing a terminal uses
   `taskkill /T`, which also catches detached child processes.
+- **The ConPTY that ships inside `node-pty`** (`conpty.dll` + `OpenConsole.exe`, `useConptyDll`), not the one
+  built into Windows: Windows 10's can't re-wrap lines when the width changes (rotating duplicated lines) and
+  never passes `clear` on, so the history stayed. The bundled one does both, and waits for the terminal to
+  answer its startup queries, which the mirror does (the app's xterm.js stays quiet so answers don't arrive
+  twice). `node-pty` is pinned: when a shell exits, the agent closes node-pty's leftover pipes and reader
+  thread, which relies on its internals.
+- **The agent decides the size.** Devices only propose what fits their screen; the size change goes into the
+  output stream at an exact point, for the shell, the mirror and every device alike, so all of them lay out the
+  same bytes at the same size. Devices never resize on their own: that is what used to leave ghost lines.
+- **xterm.js adjustments, identical in the mirror and the app** (`termProtocol.ts`): the `windowsPty` option
+  (when the screen grows, ConPTY adds empty rows instead of pulling history back, and so must xterm.js); "scroll
+  up" (CSI S, which ConPTY sends for Enter on the last row) moves lines into the history like xterm and
+  Windows Terminal instead of dropping them; and snapshots drop the serialize addon's zero-length cursor moves,
+  which terminals read as one column and which left stray characters after a restore.
+- **Clear terminal** sends Ctrl+L, so the program redraws itself (PowerShell scrolls the old screen into the
+  history), then clears the history once the program's output pauses.
 - **Terminal output flow control:** output is batched every 16 ms into binary WebSocket frames, and the app
   acknowledges what it has drawn. A device more than 1 MB behind gets no more output until it catches up, then
   a fresh snapshot instead of the backlog. If the mirror itself falls behind, the shell is paused.
