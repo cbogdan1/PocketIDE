@@ -54,7 +54,8 @@
     <button class="pick" onclick={openMenu} aria-label="Run configuration: {runs.selected ?? 'none'}, {statusText(current)}">
       <span class="dot {current?.status ?? 'idle'}" class:failed={current?.status === 'crashed'} title={statusText(current)}></span>
       <span class="name">{runs.errors.length ? `${CONFIG_FILE} has errors` : (runs.selected ?? 'Add a configuration')}</span>
-      {#if current && !active && current.exitCode}<span class="code">exit {current.exitCode}</span>{/if}
+      <!-- Only for failures: a run you stopped ends with Windows' Ctrl+Break code, which says nothing. -->
+      {#if current?.status === 'crashed'}<span class="code">exit {current.exitCode}</span>{/if}
       <Icon name="chevronDown" size={16} />
     </button>
     {#if current && active}
