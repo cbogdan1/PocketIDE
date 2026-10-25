@@ -138,7 +138,9 @@
     {#if run}
       <div class="status">
         <span class="text" class:failed={run.status === 'crashed'}>{statusText(run)}</span>
-        {#if active}
+        {#if run.kind === 'console'}
+          <!-- not a program: nothing to stop or run -->
+        {:else if active}
           <button class="small" disabled={run.status === 'stopping'} onclick={() => restartRun(run)}><Icon name="restart" size={16} />Restart</button>
           <button class="small stop" disabled={run.status === 'stopping'} onclick={() => stopRun(run.id)}><Icon name="stop" size={16} />Stop</button>
         {:else}
@@ -181,7 +183,7 @@
       <button class="bottom" aria-label="Jump to the bottom" onclick={toBottom}><Icon name="down" /></button>
     {/if}
 
-    {#if active}
+    {#if active && run?.kind !== 'console'}
       <form class="input" onsubmit={submitInput}>
         <input bind:value={input} placeholder="Input for the program" aria-label="Input for the program" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="send" />
         <button type="submit" class="send">Send</button>

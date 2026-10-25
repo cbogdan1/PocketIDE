@@ -65,7 +65,7 @@
         <Icon name="stop" />
       </button>
     {:else}
-      <button class="icon run" aria-label="Run" disabled={!runs.selected || runs.busy || !!runs.errors.length} onclick={runSelected}>
+      <button class="icon run" aria-label="Run" disabled={!runs.selected || runs.busy || !!runs.errors.length} onclick={() => runSelected()}>
         <Icon name="play" />
       </button>
     {/if}

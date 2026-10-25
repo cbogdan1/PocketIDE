@@ -3,6 +3,7 @@
   import Editor from './Editor.svelte';
   import Files from './Files.svelte';
   import Logs from './Logs.svelte';
+  import Preview from './Preview.svelte';
   import QuickOpen from './QuickOpen.svelte';
   import RunBar from './RunBar.svelte';
   import Terminal from './Terminal.svelte';
@@ -14,12 +15,12 @@
   import { ui, type Tab } from './lib/ui.svelte.ts';
   import { loadConfig, reset, workspace } from './lib/workspace.svelte.ts';
 
-  const tabs: { id: Tab; label: string; milestone: number; icon: string }[] = [
-    { id: 'files', label: 'Files', milestone: 2, icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' },
-    { id: 'editor', label: 'Editor', milestone: 2, icon: 'm9 18-6-6 6-6M15 6l6 6-6 6' },
-    { id: 'terminal', label: 'Terminal', milestone: 3, icon: 'm4 17 6-5-6-5M12 19h8' },
-    { id: 'preview', label: 'Preview', milestone: 5, icon: 'M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM8 21h8M12 17v4' },
-    { id: 'logs', label: 'Logs', milestone: 4, icon: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01' },
+  const tabs: { id: Tab; label: string; icon: string }[] = [
+    { id: 'files', label: 'Files', icon: 'M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z' },
+    { id: 'editor', label: 'Editor', icon: 'm9 18-6-6 6-6M15 6l6 6-6 6' },
+    { id: 'terminal', label: 'Terminal', icon: 'm4 17 6-5-6-5M12 19h8' },
+    { id: 'preview', label: 'Preview', icon: 'M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zM8 21h8M12 17v4' },
+    { id: 'logs', label: 'Logs', icon: 'M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01' },
   ];
 
   onMount(() => {
@@ -56,10 +57,10 @@
         <Editor />
       {:else if tab.id === 'terminal'}
         <Terminal />
-      {:else if tab.id === 'logs'}
-        <Logs />
+      {:else if tab.id === 'preview'}
+        <Preview />
       {:else}
-        <p class="placeholder">{tab.label} arrives in milestone {tab.milestone}.</p>
+        <Logs />
       {/if}
     </div>
   {/each}
@@ -148,11 +149,6 @@
     overflow: auto;
     padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
   }
-  .placeholder {
-    margin: 30vh 24px 0;
-    text-align: center;
-    color: var(--muted);
-  }
   .toast {
     position: absolute;
     left: 12px;
@@ -175,6 +171,11 @@
     border-top: 1px solid var(--border);
   }
   /* While the keyboard is up, the editor's key row takes the tab bar's place (and the toast moves out of its way). */
+  /* The Preview tab's full screen: only the page (and its exit button). */
+  :global(html.preview-full) header,
+  :global(html.preview-full) .tabbar {
+    display: none;
+  }
   :global(html.kb) .tabbar {
     display: none;
   }

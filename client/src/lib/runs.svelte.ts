@@ -23,7 +23,8 @@ export interface RunInfo {
   id: string;
   project: string;
   name: string;
-  kind: 'config' | 'file';
+  /** console: the errors a previewed page reports, not a program. */
+  kind: 'config' | 'file' | 'console';
   /** Root-relative folder it runs in. */
   cwd: string;
   type: RunType;
@@ -127,6 +128,7 @@ const seconds = (ms: number) => (ms < 60_000 ? `${(ms / 1000).toFixed(1)} s` : `
 /** "Running", "Ready on port 5173", "Exited with code 1 after 3.2 s"... */
 export function statusText(run: RunInfo | undefined): string {
   if (!run) return 'Not running';
+  if (run.kind === 'console') return run.endedAt ? 'The preview was closed' : 'Errors and warnings from the previewed page';
   const took = run.endedAt ? ` after ${seconds(run.endedAt - run.startedAt)}` : '';
   switch (run.status) {
     case 'starting':
@@ -209,7 +211,7 @@ export async function loadRuns(): Promise<void> {
 function notifyFinished(list: RunInfo[]) {
   for (const run of list) {
     const before = runs.list.find((r) => r.id === run.id);
-    if (!isActive(before) || isActive(run)) continue;
+    if (!isActive(before) || isActive(run) || run.kind === 'console') continue;
     if (ui.tab === 'logs' && document.visibilityState === 'visible') continue;
     runs.unseen++;
     if (run.status === 'crashed') runs.crashed = true;
@@ -243,18 +245,18 @@ const mergeLines = (base: LogLine[], live: LogLine[]) => {
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq);
 };
 
-async function started(run: RunInfo) {
+async function started(run: RunInfo, openLogs = runs.autoLogs) {
   runs.list = [run, ...runs.list.filter((r) => r.id !== run.id)];
   await view(run.id);
-  if (runs.autoLogs) ui.tab = 'logs';
+  if (openLogs) ui.tab = 'logs';
 }
 
-/** Runs (or, if it's running, restarts) the selected configuration. */
-export async function runSelected(): Promise<void> {
+/** Runs (or, if it's running, restarts) the selected configuration. The Preview tab stays put (`openLogs`). */
+export async function runSelected(openLogs = runs.autoLogs): Promise<void> {
   if (!runs.project || !runs.selected || runs.busy) return;
   runs.busy = true;
   try {
-    await started(await sendJson<RunInfo>('/api/runs/start', { project: runs.project, name: runs.selected }));
+    await started(await sendJson<RunInfo>('/api/runs/start', { project: runs.project, name: runs.selected }), openLogs);
   } catch (err) {
     toast(message(err));
   } finally {
@@ -292,6 +294,7 @@ export async function stopRun(id: string): Promise<void> {
 
 /** Starts the same configuration or file again (the agent stops the running one first). */
 export async function restartRun(run: RunInfo): Promise<void> {
+  if (run.kind === 'console') return;
   if (run.kind === 'file') return runFile(run.cwd ? `${run.cwd}/${run.name}` : run.name);
   selectConfig(run.name);
   return runSelected();
