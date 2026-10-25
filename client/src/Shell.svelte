@@ -160,6 +160,16 @@
   :global(html.kb) .tabbar {
     display: none;
   }
+  /*
+   * A web app can't remove iOS's accessory bar (^ ˅ Done) above the keyboard, so the header gives back its
+   * row while the keyboard is up; only the status-bar inset stays.
+   */
+  :global(html.kb) header {
+    min-height: env(safe-area-inset-top);
+  }
+  :global(html.kb) header > * {
+    display: none;
+  }
   :global(html.kb) .toast {
     top: 8px;
     bottom: auto;
