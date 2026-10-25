@@ -6,6 +6,8 @@ export interface Shell {
   label: string;
   file: string;
   args: string[];
+  /** Whether Ctrl+L clears the screen (in cmd it just types ^L). */
+  ctrlLClears: boolean;
 }
 
 const onPath = (exe: string) =>
@@ -25,15 +27,22 @@ export function detectShells(): Shell[] {
     (file): file is string => !!file && existsSync(file),
   );
   const shells: (Shell | undefined)[] = [
-    pwsh ? { id: 'pwsh', label: 'PowerShell 7', file: pwsh, args: POWERSHELL_ARGS } : undefined,
+    pwsh ? { id: 'pwsh', label: 'PowerShell 7', file: pwsh, args: POWERSHELL_ARGS, ctrlLClears: true } : undefined,
     {
       id: 'powershell',
       label: 'Windows PowerShell',
       file: join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
       args: POWERSHELL_ARGS,
+      ctrlLClears: true,
     },
-    { id: 'cmd', label: 'Command Prompt', file: process.env.ComSpec ?? join(system, 'System32', 'cmd.exe'), args: ['/k', 'chcp 65001 >nul'] },
-    bash ? { id: 'bash', label: 'Git Bash', file: bash, args: ['--login', '-i'] } : undefined,
+    {
+      id: 'cmd',
+      label: 'Command Prompt',
+      file: process.env.ComSpec ?? join(system, 'System32', 'cmd.exe'),
+      args: ['/k', 'chcp 65001 >nul'],
+      ctrlLClears: false,
+    },
+    bash ? { id: 'bash', label: 'Git Bash', file: bash, args: ['--login', '-i'], ctrlLClears: true } : undefined,
   ];
   return shells.filter((shell): shell is Shell => !!shell);
 }

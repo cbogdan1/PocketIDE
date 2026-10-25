@@ -4,6 +4,7 @@
   import Sheet, { type Action } from './Sheet.svelte';
   import { longpress } from './lib/longpress.ts';
   import {
+    clearTerminal,
     closeTerminal,
     getView,
     loadTerminals,
@@ -139,6 +140,7 @@
       actions.push(
         { label: 'Select text to copy', run: startSelect },
         { label: 'Paste', run: paste },
+        { label: 'Clear terminal', run: clearTerminal },
         { label: `Larger text (${terms.fontSize + 1}px)`, run: () => setFontSize(terms.fontSize + 1) },
         { label: `Smaller text (${terms.fontSize - 1}px)`, run: () => setFontSize(terms.fontSize - 1) },
       );

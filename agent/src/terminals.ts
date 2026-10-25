@@ -24,6 +24,8 @@ const LOW_WATER = 128 << 10;
 /** Unparsed output in the mirror before the shell is paused. */
 const MIRROR_HIGH_WATER = 4 << 20;
 const EXITED_TTL_MS = 60 * 60_000;
+/** Output paused this long after Ctrl+L: the program has redrawn. */
+const QUIET_MS = 100;
 
 /**
  * Tells xterm.js (the mirror here, and the app's) that ConPTY is on the other end: when the screen grows,
@@ -86,6 +88,7 @@ interface Session {
   mirrorBacklog: number;
   paused: boolean;
   lastActivity: number;
+  lastOutput: number;
   removeTimer?: NodeJS.Timeout;
 }
 
@@ -165,6 +168,7 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
       mirrorBacklog: 0,
       paused: false,
       lastActivity: 0,
+      lastOutput: 0,
     };
     sessions.set(s.id, s);
 
@@ -219,6 +223,7 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
     for (const c of s.clients) if (c.state !== 'behind') c.pending.push(data);
     s.flushTimer ??= setTimeout(() => flush(s), BATCH_MS);
     const now = Date.now();
+    s.lastOutput = now;
     if (now - s.lastActivity > 1000) {
       s.lastActivity = now;
       notify({ type: 'activity', id: s.id });
@@ -347,6 +352,14 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
         // The app reports bytes it has rendered, so a busy phone isn't buried under output.
         c.acked = Math.min(c.sent, c.acked + msg.n);
         if (c.state === 'live') sendPending(s, c);
+      } else if (msg.t === 'clear') {
+        // "Clear terminal": Ctrl+L asks the program (PowerShell, bash, Claude Code) to clear and redraw the screen
+        // itself, and PowerShell does that by scrolling the old screen into the history. So the history is
+        // cleared after the redraw, in the stream, for the mirror and every client.
+        if (s.exitCode === null && s.shell.ctrlLClears) {
+          s.pty.proc.write('\x0c');
+          clearHistoryAfterRedraw(s);
+        } else output(s, '\x1b[3J');
       }
     });
     ws.on('close', () => {
@@ -358,6 +371,18 @@ export function createTerminals(config: ConfigStore, notify: (event: TerminalEve
       s.controller = next;
       if (next) resize(s, next.cols, next.rows);
     });
+  }
+
+  /** Clears the history once the program's reply has arrived and paused, or a second on (a busy program). */
+  function clearHistoryAfterRedraw(s: Session) {
+    const asked = Date.now();
+    const check = () => {
+      if (!sessions.has(s.id)) return;
+      const now = Date.now();
+      if ((s.lastOutput > asked && now - s.lastOutput >= QUIET_MS) || now - asked >= 1000) output(s, '\x1b[3J');
+      else setTimeout(check, QUIET_MS).unref();
+    };
+    setTimeout(check, QUIET_MS).unref();
   }
 
   function remove(s: Session) {

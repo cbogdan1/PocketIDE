@@ -344,6 +344,32 @@ test('lines scrolled off by Enter in the last row stay in the history', windowsO
   await api('/api/terminals/close', 'POST', { id });
 });
 
+test('clear and cls also clear the history, and so does Clear terminal', windowsOnly, async () => {
+  const cases = [
+    { shell: 'powershell', print: '1..80 | % { "row $_" }', clear: (p: Phone) => type(p, 'clear\r') },
+    { shell: 'cmd', print: 'for /L %i in (1,1,80) do @echo row %i', clear: (p: Phone) => type(p, 'cls\r') },
+    { shell: 'powershell', print: '1..80 | % { "row $_" }', clear: (p: Phone) => p.ws.send(JSON.stringify({ t: 'clear' })) },
+  ];
+  for (const { shell, print, clear } of cases) {
+    const { id } = await newTerminal({ shell });
+    const phone = await attach(id, 60, 20);
+    await waitFor(async () => /PS .*>|>$/m.test(await screen(phone)), `the ${shell} prompt`, 20_000);
+    type(phone, `${print}\r`);
+    await waitFor(async () => (await screen(phone)).includes('row 80\n'), 'the rows');
+    await settle(phone);
+    assert.ok(phone.term.buffer.active.baseY > 0, 'there is history to clear');
+    phone.term.scrollLines(-30); // looking at old output
+    clear(phone);
+    const rows = () => dump(phone.term).lines.filter((line) => /^row \d+$/.test(line));
+    await waitFor(() => phone.term.buffer.active.baseY === 0 && !rows().length, `${shell}: history and rows gone`);
+    const b = phone.term.buffer.active;
+    assert.equal(b.viewportY, b.baseY, 'back at the bottom');
+    await assertMatchesMirror(phone, id, `after clearing in ${shell}`);
+    await close(phone);
+    await api('/api/terminals/close', 'POST', { id });
+  }
+});
+
 test('at most 8 terminals; an exited one makes room', windowsOnly, async () => {
   for (const t of await list()) await api('/api/terminals/close', 'POST', { id: t.id });
   const ids: string[] = [];

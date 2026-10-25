@@ -179,6 +179,11 @@ export class TermView {
     this.connect();
   }
 
+  /** Clears the history (for every device) and asks the program to clear its screen. */
+  clear() {
+    this.control({ t: 'clear' });
+  }
+
   private connect() {
     clearTimeout(this.retryTimer);
     this.propose();

@@ -119,6 +119,11 @@ export async function closeTerminal(id: string): Promise<void> {
   await loadTerminals();
 }
 
+/** Like VS Code's "Clear": the history goes on every device, and the program is asked to clear its screen. */
+export function clearTerminal(): void {
+  view?.clear();
+}
+
 export function setFontSize(px: number): void {
   terms.fontSize = Math.min(28, Math.max(8, px));
   try {
