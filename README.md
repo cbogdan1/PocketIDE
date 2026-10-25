@@ -216,3 +216,8 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 Future ideas:
 
 - Restore deleted files (undo toast + Recently deleted list)
+- Files tab UX: a *New project* button in the projects list that creates a folder directly in the projects
+  root, and a *+* button in the project header to create a new file or folder in the current folder (no need to
+  go up a level and long-press)
+- Shared terminals with VS Code: a `pocketide` CLI (`pocketide new`, `attach`, `ls`) and a "PocketIDE" terminal
+  profile in VS Code, so the same terminal session is visible in VS Code on the PC and on the phone
