@@ -107,7 +107,8 @@ export class TermView {
   /** xterm.js has no touch scrolling: drag through the scrollback, with a little momentum when let go. */
   private touchScroll(host: HTMLElement) {
     let lastY = 0;
-    let lastTime = 0;
+    let sampleY = 0; // where the finger was when the speed was last measured, and when
+    let sampleTime = 0;
     let velocity = 0; // lines per millisecond
     let carry = 0; // fraction of a line not scrolled yet
     let frame = 0;
@@ -120,29 +121,34 @@ export class TermView {
     };
     host.addEventListener('touchstart', (e) => {
       cancelAnimationFrame(frame);
-      lastY = e.touches[0].clientY;
-      lastTime = e.timeStamp;
+      lastY = sampleY = e.touches[0].clientY;
+      sampleTime = e.timeStamp;
       velocity = 0;
       carry = 0;
     }, { passive: true });
     host.addEventListener('touchmove', (e) => {
       const y = e.touches[0].clientY;
-      const lines = (lastY - y) / lineHeight();
-      if (e.timeStamp > lastTime) velocity = lines / (e.timeStamp - lastTime);
+      scroll((lastY - y) / lineHeight());
       lastY = y;
-      lastTime = e.timeStamp;
-      scroll(lines);
       e.preventDefault(); // no page bounce
+      // Speed over at least 8ms, capped: back-to-back events would otherwise fling the view for seconds.
+      const elapsed = e.timeStamp - sampleTime;
+      if (elapsed < 8) return;
+      velocity = Math.max(-1.5, Math.min(1.5, (sampleY - y) / lineHeight() / elapsed));
+      sampleY = y;
+      sampleTime = e.timeStamp;
     }, { passive: false });
-    host.addEventListener('touchend', () => {
-      let previous = performance.now();
+    host.addEventListener('touchend', (e) => {
+      if (e.timeStamp - sampleTime > 80 || Math.abs(velocity) < 0.01) return; // the finger rested before lifting
+      let previous: number | undefined;
       const glide = (now: number) => {
-        scroll(velocity * (now - previous));
-        velocity *= 0.95 ** ((now - previous) / 16);
+        const elapsed = previous === undefined ? 16 : Math.min(now - previous, 50);
         previous = now;
-        if (Math.abs(velocity) > 0.002) frame = requestAnimationFrame(glide);
+        scroll(velocity * elapsed);
+        velocity *= 0.95 ** (elapsed / 16);
+        if (Math.abs(velocity) > 0.003) frame = requestAnimationFrame(glide);
       };
-      if (Math.abs(velocity) > 0.01) frame = requestAnimationFrame(glide);
+      frame = requestAnimationFrame(glide);
     });
   }
 
