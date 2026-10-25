@@ -18,6 +18,7 @@
     typeKey,
     type Doc,
   } from './lib/editor.svelte.ts';
+  import { runFile, runnable, runs } from './lib/runs.svelte.ts';
   import { openQuickOpen, ui } from './lib/ui.svelte.ts';
 
   const KEYS = ['Tab', '{', '}', '[', ']', '(', ')', '<', '>', ';', ':', '"', "'", '=', '/'];
@@ -69,6 +70,11 @@
         <Icon name="settings" />
       </button>
       <span class="spacer"></span>
+      {#if active && runnable(active.path)}
+        <button class="icon run" aria-label="Run {active.name}" disabled={runs.busy || active.saving} onpointerdown={keepFocus} onclick={() => runFile(active.path)}>
+          <Icon name="play" />
+        </button>
+      {/if}
       {#if unsaved > 1}
         <button class="secondary" onpointerdown={keepFocus} onclick={saveAll}>Save all ({unsaved})</button>
       {/if}
@@ -216,6 +222,12 @@
   }
   .icon[aria-expanded='true'] {
     color: var(--accent);
+  }
+  .run {
+    color: var(--accent);
+  }
+  .run :global(svg) {
+    fill: currentColor;
   }
   .spacer {
     flex: 1;
