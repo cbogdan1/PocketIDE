@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import WebSocket, { WebSocketServer } from 'ws';
 import { createAuth } from './auth.ts';
 import { createConfig } from './config.ts';
-import { downstreamHeaders, injectScript, parseNetstat, projectPaths, upstreamHeaders } from './preview.ts';
+import { downstreamHeaders, injectScript, parseNetstat, projectPaths, tailnetPort, upstreamHeaders } from './preview.ts';
 import { createApp } from './server.ts';
 import { startAgent } from './testing.ts';
 
@@ -22,6 +22,8 @@ let state;
 try { state = JSON.parse(readFileSync(file, 'utf8')); } catch { state = { TCP: { '443': { HTTPS: true } }, calls: [] }; }
 const args = process.argv.slice(2);
 state.calls.push(args.join(' '));
+// Like the real CLI (a round trip to tailscaled): calls running at the same time would overwrite each other.
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 150);
 let code = 0;
 if (args[1] === 'status') process.stdout.write(JSON.stringify({ TCP: state.TCP }));
 else {
@@ -297,40 +299,41 @@ test('tailscale serve entries: added for the phone, removed when the dev server 
   const other: Server = createServer((_req, res) => res.end('other'));
   await new Promise<void>((r) => other.listen(0, '127.0.0.1', r));
   const port = (other.address() as AddressInfo).port;
-  setServeState({ '443': { HTTPS: true }, [port + 10000]: { HTTPS: true, proxy: 'theirs' } });
+  setServeState({ '443': { HTTPS: true }, [tailnetPort(port)]: { HTTPS: true, proxy: 'theirs' } });
 
   const local = await open(port); // from a desktop browser on the PC: nothing is published
   assert.equal(local.ext, null);
   assert.deepEqual(serveState().calls, []);
   const phone = await open(port, TAILNET);
-  assert.equal(phone.ext, port + 10001);
-  assert.equal(serveState().TCP[port + 10001].proxy, `http://127.0.0.1:${phone.local}`);
-  assert.equal(serveState().TCP[port + 10000].proxy, 'theirs');
+  assert.equal(phone.ext, tailnetPort(port) + 1);
+  assert.equal(serveState().TCP[tailnetPort(port) + 1].proxy, `http://127.0.0.1:${phone.local}`);
+  assert.equal(serveState().TCP[tailnetPort(port)].proxy, 'theirs');
   const config = () => JSON.parse(readFileSync(join(agent.dir, 'config.json'), 'utf8'));
-  assert.deepEqual(config().previewServe, [port + 10001]);
+  assert.deepEqual(config().previewServe, [tailnetPort(port) + 1]);
 
   // The dev server stops: the preview closes after a while and leaves the tailnet.
   other.close();
   other.closeAllConnections();
-  await waitFor(() => !serveState().TCP[port + 10001], 'the serve entry to be removed');
+  await waitFor(() => !serveState().TCP[tailnetPort(port) + 1], 'the serve entry to be removed');
   await waitFor(() => config().previewServe.length === 0, 'the record to be cleared');
-  assert.ok(serveState().TCP['443'] && serveState().TCP[port + 10000], 'other entries are untouched');
+  assert.ok(serveState().TCP['443'] && serveState().TCP[tailnetPort(port)], 'other entries are untouched');
 
   // Shutdown removes the rest (synchronously, as on Ctrl+C).
   await open(devPort(), TAILNET);
-  assert.ok(serveState().TCP[devPort() + 10000]);
+  assert.ok(serveState().TCP[tailnetPort(devPort())]);
   agent.server.shutdown();
-  assert.equal(serveState().TCP[devPort() + 10000], undefined);
+  assert.equal(serveState().TCP[tailnetPort(devPort())], undefined);
   assert.ok(serveState().TCP['443']);
   assert.deepEqual(config().previewServe, []);
 });
 
 test('entries left behind by a crash are removed at the next start', async () => {
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pocketide-')));
-  writeFileSync(join(dir, 'config.json'), JSON.stringify({ previewServe: [23456] }));
-  setServeState({ '443': { HTTPS: true }, '23456': { HTTPS: true }, '23457': { HTTPS: true } });
+  writeFileSync(join(dir, 'config.json'), JSON.stringify({ previewServe: [23456, 23458, 23459] }));
+  setServeState({ '443': { HTTPS: true }, '23456': { HTTPS: true }, '23457': { HTTPS: true }, '23458': { HTTPS: true }, '23459': { HTTPS: true } });
   const app = createApp(createAuth(join(dir, 'auth.json')), createConfig(join(dir, 'config.json')), dir, { tailscale });
-  await waitFor(() => !serveState().TCP['23456'], 'the leftover to be removed');
+  // All of them: the CLI calls run one at a time (at once, they'd overwrite each other's changes).
+  await waitFor(() => !serveState().TCP['23456'] && !serveState().TCP['23458'] && !serveState().TCP['23459'], 'the leftovers to be removed');
   assert.ok(serveState().TCP['443'] && serveState().TCP['23457'], 'only what the agent made is removed');
   await waitFor(() => JSON.parse(readFileSync(join(dir, 'config.json'), 'utf8')).previewServe?.length === 0, 'the record to be cleared');
   app.shutdown();

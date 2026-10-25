@@ -46,6 +46,8 @@ interface Preview {
   /** The tailnet HTTPS port it's published on with `tailscale serve`, once a phone asked for it. */
   ext: number | null;
   publishError: string | null;
+  /** When the proxy started: a new one means the page in the app must be loaded again. */
+  since: number;
   /** Dev servers listen on IPv4 or IPv6 localhost, whichever `localhost` resolved to. */
   upstream: '127.0.0.1' | '::1';
   agent: Agent;
@@ -79,6 +81,9 @@ export function createPreviews(opts: {
   const previews = new Map<number, Promise<Preview>>();
   const live = new Map<number, Preview>();
   const checked = new Map<string, number>();
+  // One at a time: each `tailscale serve` call reads the whole serve config, changes it and writes it back, so
+  // two at once would undo each other.
+  let tailscaleQueue: Promise<unknown> = Promise.resolve();
 
   // Serve entries left behind by a crash are removed at startup; only ports recorded as ours are touched.
   const recorded = () => config.read().previewServe ?? [];
@@ -100,11 +105,16 @@ export function createPreviews(opts: {
 
   function runTailscale(args: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
     if (!tailscale) return Promise.resolve({ code: -1, stdout: '', stderr: "Tailscale isn't installed on the PC" });
-    return new Promise((resolve) =>
-      execFile(tailscale[0], [...tailscale.slice(1), ...args], { timeout: 15_000, windowsHide: true }, (err, stdout, stderr) =>
-        resolve({ code: err ? (typeof err.code === 'number' ? err.code : -1) : 0, stdout, stderr: stderr || (err?.message ?? '') }),
-      ),
+    const run = tailscaleQueue.then(
+      () =>
+        new Promise<{ code: number; stdout: string; stderr: string }>((resolve) =>
+          execFile(tailscale[0], [...tailscale.slice(1), ...args], { timeout: 15_000, windowsHide: true }, (err, stdout, stderr) =>
+            resolve({ code: err ? (typeof err.code === 'number' ? err.code : -1) : 0, stdout, stderr: stderr || (err?.message ?? '') }),
+          ),
+        ),
     );
+    tailscaleQueue = run;
+    return run;
   }
 
   /** Publishes the preview on the tailnet: `tailscale serve --bg --https=<ext> http://127.0.0.1:<proxy>`. */
@@ -122,7 +132,7 @@ export function createPreviews(opts: {
       taken = [];
     }
     const ours = [...live.values()].map((q) => q.ext);
-    let ext = p.port <= 55535 ? p.port + 10000 : p.port - 10000;
+    let ext = tailnetPort(p.port);
     // A port someone else serves (your own `tailscale serve` settings, another preview) is never replaced.
     while (taken.includes(String(ext)) || ours.includes(ext)) ext++;
     record([...new Set([...recorded(), ext])]); // before creating it, so a crash in between still cleans it up
@@ -157,6 +167,7 @@ export function createPreviews(opts: {
       local: 0,
       ext: null,
       publishError: null,
+      since: Date.now(),
       upstream: '127.0.0.1',
       agent: new Agent({ keepAlive: true }),
       lastUsed: Date.now(),
@@ -179,7 +190,7 @@ export function createPreviews(opts: {
       socket.on('close', () => p.connections.delete(socket));
     });
     // The same number as the tailnet port when it's free, so the two addresses are easy to match up.
-    const preferred = port <= 55535 ? port + 10000 : port - 10000;
+    const preferred = tailnetPort(port);
     p.local = await listen(p.server, preferred).catch(() => listen(p.server, 0));
     p.upstream = await pickUpstream(port);
     live.set(port, p);
@@ -364,7 +375,7 @@ export function createPreviews(opts: {
       const target = checkPort(port);
       const viaTailnet = (req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase().endsWith('.ts.net');
       const p = await open(project, target, viaTailnet);
-      json(res, 200, { port: p.port, local: p.local, ext: p.ext, publishError: p.publishError });
+      json(res, 200, { port: p.port, local: p.local, ext: p.ext, publishError: p.publishError, since: p.since });
     },
     'POST /api/preview/handoff': async (req, res) => {
       const { port, path } = await jsonBody(req);
@@ -413,6 +424,12 @@ export function createPreviews(opts: {
     },
   };
 }
+
+/**
+ * The tailnet port for a dev server's preview: 10000 up (5173 → 15173), or down near the top of the range. The
+ * same every time, so the preview keeps its origin, and with it the app's local storage and logins.
+ */
+export const tailnetPort = (port: number) => (port <= 55535 ? port + 10000 : port - 10000);
 
 /** The Tailscale CLI, if installed. */
 export function findTailscale(): Tailscale {
