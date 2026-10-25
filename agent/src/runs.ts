@@ -111,7 +111,8 @@ interface Run {
   key: string;
   project: string;
   name: string;
-  kind: 'config' | 'file';
+  /** console: no program, just the errors a previewed page reports (see preview.ts). */
+  kind: 'config' | 'file' | 'console';
   /** The folder it runs in, relative to the projects folder ('/'-separated). */
   cwd: string;
   type: RunType;
@@ -121,7 +122,7 @@ interface Run {
   exitCode: number | null;
   startedAt: number;
   endedAt: number | null;
-  child: ChildProcess;
+  child?: ChildProcess;
   log: ReturnType<typeof createLog>;
   changed: Map<number, LogLine>;
   flushTimer?: NodeJS.Timeout;
@@ -277,7 +278,8 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
     run.endedAt = Date.now();
     run.status = run.stopRequested || code === 0 ? 'exited' : 'crashed';
     const took = `${((run.endedAt - run.startedAt) / 1000).toFixed(1)} s`;
-    run.log.note('info', run.stopRequested ? `■ Stopped after ${took}` : `■ Exited with code ${code} after ${took}`);
+    if (run.kind === 'console') run.log.note('info', '■ The preview was closed');
+    else run.log.note('info', run.stopRequested ? `■ Stopped after ${took}` : `■ Exited with code ${code} after ${took}`);
     forgetOld(run.key);
     changed(run);
   }
@@ -308,6 +310,7 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
    */
   async function stop(run: Run) {
     if (!isActive(run)) return;
+    if (!run.child) return finish(run, 0);
     if (!run.stopRequested) {
       run.stopRequested = true;
       run.status = 'stopping';
@@ -327,7 +330,7 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
 
   function forceStopAll() {
     for (const run of runs.values()) {
-      if (!isActive(run) || !run.child.pid) continue;
+      if (!isActive(run) || !run.child?.pid) continue;
       run.stopRequested = true;
       try {
         execFileSync('taskkill', ['/PID', String(run.child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore', timeout: 10_000 });
@@ -404,7 +407,7 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
       const { id, text } = await jsonBody(req);
       const run = find(id);
       if (typeof text !== 'string' || text.length > 10_000) throw new HttpError(400, 'Invalid input');
-      if (!isActive(run)) throw new HttpError(409, 'The program has finished');
+      if (!isActive(run) || !run.child) throw new HttpError(409, 'The program has finished');
       run.log.note('in', text);
       run.child.stdin!.write(text + '\n');
       json(res, 200, {});
@@ -427,7 +430,52 @@ export function createRuns(config: ConfigStore, notify: (event: RunEvent) => voi
     unwatch: (ws: WebSocket) => watching.delete(ws),
     /** Synchronous, so it also works while the agent is exiting. */
     stopAll: forceStopAll,
+    previewConsole,
   };
+
+  /**
+   * The "Preview console" log for a previewed port: errors and warnings the page reports. File links in it are
+   * resolved from the folder of the web configuration on that port (where the dev server serves from).
+   */
+  function previewConsole(project: string, port: number) {
+    const key = `${project}\0console:${port}`;
+    let run = [...runs.values()].find((r) => r.key === key && isActive(r));
+    if (!run) {
+      const web = [...runs.values()].filter((r) => r.project === project && r.port === port && r.kind === 'config').sort((a, b) => b.startedAt - a.startedAt)[0];
+      const created: Run = {
+        id: randomBytes(9).toString('base64url'),
+        key,
+        project,
+        name: `Preview console :${port}`,
+        kind: 'console',
+        cwd: web?.cwd ?? project,
+        type: 'web',
+        port,
+        command: '',
+        status: 'running',
+        exitCode: null,
+        startedAt: Date.now(),
+        endedAt: null,
+        log: createLog((line) => {
+          created.changed.set(line.seq, line);
+          created.flushTimer ??= setTimeout(() => flush(created), 50);
+        }),
+        changed: new Map(),
+        stopRequested: false,
+        exited: Promise.resolve(),
+      };
+      run = created;
+      runs.set(run.id, run);
+      run.log.note('info', `Errors and warnings from the page previewed on port ${port}`);
+      forgetOld(key);
+      changed(run);
+    }
+    const page = run;
+    return {
+      write: (level: 'error' | 'warn', text: string) => page.log.note(level === 'error' ? 'err' : 'out', level === 'warn' ? `⚠ ${text}` : text),
+      close: () => finish(page, 0),
+    };
+  }
 }
 
 /** True if something accepts connections on the port (IPv4 or IPv6 localhost: dev servers use either). */
