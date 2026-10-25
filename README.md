@@ -4,9 +4,9 @@ A self-hosted, mobile-first remote dev environment: it runs on your Windows PC a
 iPhone as an installable web app. You get your project's files, a terminal, Run/Stop, logs and a preview
 of the app you're building, not the whole desktop. It is reachable only inside your Tailscale network.
 
-**Status: milestone 3 of 7.** Login, an installable app shell, a file browser, a code editor that stays in
-sync with changes made on the PC, and terminals that keep running while your phone is away (good enough to
-drive Claude Code from the phone). The Preview/Logs tabs are placeholders for now.
+**Status: milestone 4 of 7.** Login, an installable app shell, a file browser, a code editor that stays in
+sync with changes made on the PC, terminals that keep running while your phone is away (good enough to
+drive Claude Code from the phone), and Run/Stop/Restart with live logs. The Preview tab is a placeholder for now.
 
 ## Features
 
@@ -69,6 +69,48 @@ drive Claude Code from the phone). The Preview/Logs tabs are placeholders for no
   same screen at that size. Rotating, the keyboard and switching tabs don't duplicate or lose lines.
 - While the keyboard is up, the app's header is hidden to give the terminal more rows.
 
+**Run, Stop, Restart (header) and the Logs tab**
+
+- The header shows the project's selected run configuration with a status dot (grey idle or finished, amber
+  starting or stopping, green running, glowing green when a web server is ready, red failed, plus the exit
+  code) and ▶ Run, or ↻ Restart and ■ Stop while it runs. Tap the name to pick another configuration. Several
+  configurations can run at the same time.
+- Configurations come from `pocketide.json` in the project folder:
+
+  ```json
+  {
+    "configs": [
+      { "name": "Dev server", "type": "web", "command": "npm run dev", "port": 5173 },
+      { "name": "Desktop app", "type": "desktop", "command": "dotnet run", "windowTitle": "MyApp" },
+      { "name": "Tests", "type": "task", "command": "npm test", "cwd": "client", "env": { "CI": "1" } }
+    ],
+    "default": "Dev server"
+  }
+  ```
+
+  `web` is a server with a port (it's *ready* once something listens there), `desktop` a program with a window
+  (it opens on the PC's screen), `task` something that runs and finishes. Optional: `cwd` (a folder inside the
+  project), `env`, `shell` (`cmd` by default, or `powershell`, `pwsh`, `bash`). Mistakes are explained in the
+  header's menu and when you save the file.
+- Without `pocketide.json`, configurations are guessed from `package.json` scripts (dev, start, build, test),
+  `*.csproj`/`*.sln`, `Cargo.toml`, `main.py`/`app.py` and a `Makefile`; *Save these as pocketide.json* keeps
+  them. *Edit configurations* is a form; *Edit pocketide.json* opens the file in the editor.
+- **Run current file** (▶ in the editor) for single-file programs: C and C++ (gcc/g++ or clang), Rust (rustc),
+  Python, JavaScript/TypeScript (node) and PowerShell. Compiled programs go to a temporary folder. Unsaved
+  changes are saved first. A missing compiler is named, with where to get it.
+- Logs keep the last 10,000 lines of each run on the PC, so reopening the app shows them; the last 3 finished
+  runs of each configuration stay too. Colors are kept, errors (stderr) have a red edge, timestamps can be
+  turned on, and a filter shows only matching lines. *Copy all* and *Clear* are in the `⋯` menu.
+- A program that asks for input (`scanf`, `input()`) gets it from the field under the log.
+- `file:line` in compiler and runtime output (gcc/clang, rustc/cargo, tsc, dotnet, Python and Node.js
+  tracebacks) is a link that opens the file at that line.
+- Run switches to the Logs tab (turn that off in its `⋯` menu). A run that finishes while you're elsewhere
+  puts a badge on the Logs tab, red if it failed.
+- Stop asks first, like pressing Ctrl+C, then Ctrl+Break; whatever still runs after a few seconds is ended,
+  including programs it started. A desktop app's windows are asked to close.
+- Runs keep going while the phone is away. **They are stopped when the agent stops** (Ctrl+C in its window,
+  closing the window, or restarting the PC).
+
 ## Setup on the PC (Windows 10/11)
 
 Prerequisite: Node.js 22.18 or newer (24 LTS recommended). The agent runs its TypeScript directly, with no
@@ -87,7 +129,8 @@ Windows binaries, so neither Python nor Visual Studio Build Tools are needed.
 The agent listens on `http://127.0.0.1:7420` (loopback only; change it with the `PORT` env var).
 Your password hash and sessions are stored in `%LOCALAPPDATA%\PocketIDE\auth.json`.
 
-Restarting the agent (Ctrl+C, a reboot, or `npm start` again) ends every terminal and whatever runs in it.
+Restarting the agent (Ctrl+C, a reboot, or `npm start` again) ends every terminal and every run, and whatever
+runs in them.
 
 - Change the password: `npm run set-password` (this also logs out every device; it works while the agent is running).
 - Keep the PC awake: set *Settings → System → Power & sleep → Sleep* to *Never* while plugged in.
@@ -142,13 +185,17 @@ iOS closing the app. Save before you leave it for long.
 - Terminal connections pass the same session, `Origin` and `Host` checks. After a logout or password change,
   an open terminal connection is dropped the next time it's used (checked at most every 10 seconds). A terminal
   is a full shell on your PC with your user's rights, and it can leave the projects folder like any shell.
+- Runs only start commands from the project's `pocketide.json`, the agent's own detection, or "Run current file"
+  for a file inside the projects folder: the app never sends a command line. Whoever can edit `pocketide.json`
+  (you, from the editor) can put any command there, just as in a terminal.
 - Settings (projects folder, last project, open tabs) are stored in `%LOCALAPPDATA%\PocketIDE\config.json`.
   `"terminalScrollback": 5000` there sets how many lines each terminal keeps.
 
 ## Development
 
 ```powershell
-npm test           # node:test: sandboxing, save conflicts, Recycle Bin, terminals (restore, limits, tree kill, paste), auth, security
+npm test           # node:test: sandboxing, save conflicts, Recycle Bin, terminals, runs (config validation,
+                   # detection, tree stop, statuses, log buffer, port readiness, stdin, C and Python), log links, auth
 npm run check      # tsc (agent) + svelte-check (client)
 ```
 
@@ -198,6 +245,21 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
   permanently instead of recycling.
 - Rename, new file and delete use the system `prompt`/`confirm` dialogs: they're accessible and bring up the iOS
   keyboard reliably.
+- **Runs use pipes, not a terminal**, so output is clean lines with stdout and stderr apart (stderr gets its red
+  edge, timestamps are per line, filtering is simple). Programs then know they aren't in a terminal, so the agent
+  asks for colors anyway (`FORCE_COLOR`, `CARGO_TERM_COLOR`, `-fdiagnostics-color`...) and for unbuffered output
+  (`PYTHONUNBUFFERED`, `py -u`). C would still hold a prompt back until exit, so "Run current file" links a tiny
+  `unbuffered.c` into C/C++ programs. Spinners and full-screen programs belong in the Terminal tab.
+- **Each run gets a hidden console of its own** (`windowsHide`): its windows still show on the PC, and Stop can
+  send that console Ctrl+C and Ctrl+Break like a keyboard would. Node can't, so `ctrl.ps1` attaches to the
+  console for a moment (the same Add-Type approach as the Recycle Bin). Ctrl+Break follows because a program
+  can inherit "ignore Ctrl+C", and cmd's "Terminate batch job (Y/N)?" after `npm run` is answered. As runs don't
+  share the agent's console, the agent stops them itself when it exits.
+- **Readiness** of a web configuration means something accepts connections on its port (IPv4 or IPv6 localhost:
+  dev servers use either), checked every half second. If the port is already taken at the start, the log says so.
+- **Logs stream over the events socket**, only for the run on screen, batched every 50 ms; an unfinished line
+  (a prompt) is sent at once and updated as it grows. The log is a normal scrolling list (iOS's own momentum
+  scrolling, so the terminal's touch code isn't needed), drawn in chunks that are skipped while off screen.
 - **Rust** for the desktop-capture helper (milestone 6): it's already installed here, builds to a single `.exe`
   with no runtime, the official `windows` crate covers Windows.Graphics.Capture, D3D11 and `SendInput`, and
   without a garbage collector the frame timing stays steady. Media Foundation gives a path to H.264 later.
@@ -208,7 +270,7 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 1. ✅ Skeleton: agent, auth, installable PWA over `tailscale serve`
 2. ✅ File browser + editor (live sync with changes on disk)
 3. ✅ Terminal (persistent sessions with exact screen restore, extra key row, works with Claude Code)
-4. Process manager, logs, Run/Stop/Restart, `pocketide.json`
+4. ✅ Process manager, logs, Run/Stop/Restart, `pocketide.json`
 5. Web preview via reverse proxy (with HMR)
 6. Desktop window capture + window-scoped input (plus the Windows Defender exclusion notes)
 7. Polish: reconnection, performance, landscape split view, notifications, autostart via Task Scheduler
