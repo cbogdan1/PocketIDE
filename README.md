@@ -4,9 +4,10 @@ A self-hosted, mobile-first remote dev environment: it runs on your Windows PC a
 iPhone as an installable web app. You get your project's files, a terminal, Run/Stop, logs and a preview
 of the app you're building, not the whole desktop. It is reachable only inside your Tailscale network.
 
-**Status: milestone 4 of 7.** Login, an installable app shell, a file browser, a code editor that stays in
+**Status: milestone 5 of 7.** Login, an installable app shell, a file browser, a code editor that stays in
 sync with changes made on the PC, terminals that keep running while your phone is away (good enough to
-drive Claude Code from the phone), and Run/Stop/Restart with live logs. The Preview tab is a placeholder for now.
+drive Claude Code from the phone), Run/Stop/Restart with live logs, and a preview of the web app you're
+developing with hot reload.
 
 ## Features
 
@@ -111,6 +112,27 @@ drive Claude Code from the phone), and Run/Stop/Restart with live logs. The Prev
 - Runs keep going while the phone is away. **They are stopped when the agent stops** (Ctrl+C in its window,
   closing the window, or restarting the PC).
 
+**Preview tab**
+
+- Shows the web app running on your PC's dev server (Vite, Next.js, Express, Python's `http.server`...) as soon
+  as the selected `web` configuration is ready. Until then it says why: not running (with *Run*), starting
+  (waiting for its port), or failed (with the error and *Open the log*).
+- Hot reload works: when you or Claude Code save a file, the preview updates by itself (HMR WebSockets are
+  passed through).
+- Tap the name above the page to preview another web configuration, a port you started yourself (for example
+  from the Terminal tab; ports programs listen on are listed with the program's name, likely dev servers
+  first), or a port you type.
+- Toolbar: Back, Forward, Reload, an address bar for the path (`/about`), full screen (hides PocketIDE's header
+  and tab bar; a small button brings them back), and in `⋯`: *Hard reload* (empties the preview's cache),
+  *Open in Safari*, and *Open the Preview console*.
+- The page's `console.error`/`console.warn` and uncaught exceptions go to a *Preview console* entry in the Logs
+  tab; file paths in their stack traces open in the editor.
+- The last path you looked at is remembered per project.
+- Each previewed app gets its own address: `https://<pc-name>.<tailnet>.ts.net:<port + 10000>` (5173 → 15173)
+  on the phone, published by the agent with `tailscale serve`. Only your PocketIDE session can open it.
+  The app's own requests to `localhost:<another port>` (a separate API server) can't work from the phone: use
+  relative URLs or your dev server's proxy (Vite's `server.proxy`) for those.
+
 ## Setup on the PC (Windows 10/11)
 
 Prerequisite: Node.js 22.18 or newer (24 LTS recommended). The agent runs its TypeScript directly, with no
@@ -148,7 +170,15 @@ runs in them.
 
    The `--bg` setting persists across reboots. To remove it, run `tailscale serve reset`.
 
-Never use `tailscale funnel` for PocketIDE: that exposes it to the public internet.
+Previews need nothing extra: when the phone opens one, the agent adds its own entry
+(`tailscale serve --bg --https=<port> ...`, visible in `tailscale serve status`) and removes it again when the
+preview closes (its dev server has been gone for a minute, or nobody has looked at it for half an hour) or the
+agent stops. Entries left by a crash are removed at the next start. It only ever touches entries it made (they're
+listed in `config.json`), never your own and never the 443 one above. If one of its ports is taken by your own
+entry, it uses the next port. From a browser on the PC, previews open at `http://localhost:<port>` instead and
+nothing is published.
+
+Never use `tailscale funnel` for PocketIDE: that exposes it to the public internet. The agent never does.
 
 ## iPhone
 
@@ -188,6 +218,13 @@ iOS closing the app. Save before you leave it for long.
 - Runs only start commands from the project's `pocketide.json`, the agent's own detection, or "Run current file"
   for a file inside the projects folder: the app never sends a command line. Whoever can edit `pocketide.json`
   (you, from the editor) can put any command there, just as in a terminal.
+- Previews: the proxy for each one listens on `127.0.0.1` only and connects only to this PC's loopback
+  (`127.0.0.1` or `::1`) on the previewed port, never to another host, PocketIDE's own port, or a preview proxy.
+  It needs the PocketIDE session cookie (browsers send it to every port of the host) and strips it before
+  forwarding, so the dev server and the app's code never see it; a cookie the app sets under that name is
+  dropped. Each preview is its own origin, so the app's JavaScript can't call PocketIDE's API (writes from
+  another origin are refused). Only PocketIDE may show it in a frame (`frame-ancestors`). *Open in Safari* uses a
+  one-time link that works for a minute.
 - Settings (projects folder, last project, open tabs) are stored in `%LOCALAPPDATA%\PocketIDE\config.json`.
   `"terminalScrollback": 5000` there sets how many lines each terminal keeps.
 
@@ -195,11 +232,13 @@ iOS closing the app. Save before you leave it for long.
 
 ```powershell
 npm test           # node:test: sandboxing, save conflicts, Recycle Bin, terminals, runs (config validation,
-                   # detection, tree stop, statuses, log buffer, port readiness, stdin, C and Python), log links, auth
+                   # detection, tree stop, statuses, log buffer, port readiness, stdin, C and Python), log links,
+                   # previews (header rewriting, WebSockets, auth, localhost-only, serve cleanup), auth
 npm run check      # tsc (agent) + svelte-check (client)
 ```
 
 Two tests use the real Recycle Bin and remove their items from it afterwards, so test files run one at a time.
+Preview tests use a stand-in for the Tailscale CLI; they never change your real serve settings.
 
 Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is the PWA (Svelte 5 + Vite).
 
@@ -263,6 +302,24 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 - **Rust** for the desktop-capture helper (milestone 6): it's already installed here, builds to a single `.exe`
   with no runtime, the official `windows` crate covers Windows.Graphics.Capture, D3D11 and `SendInput`, and
   without a garbage collector the frame timing stays steady. Media Foundation gives a path to H.264 later.
+- **A preview origin per dev server**: a proxy on `127.0.0.1` published as `https://<pc>.ts.net:<port + 10000>`.
+  Apps load from their origin's root, so absolute URLs (`/@vite/client`, `/_next/...`) and HMR WebSocket paths
+  work unchanged. A path prefix on PocketIDE's own address (`/preview/5173/`) breaks those, and would let the
+  app's JavaScript call PocketIDE's API; one shared preview port would make apps share storage and service
+  workers and allow only one preview at a time; `tailscale serve` straight to the dev server would skip the
+  login and the header fixes. The port is the same every time, so the app keeps its storage and logins.
+- **The session cookie works on the preview ports** because cookies aren't separated by port (checked in
+  Chrome). Safari has its own cookie jar, hence the one-time link for *Open in Safari*.
+- **Rewrites so dev servers accept the requests**: `Host`, `Origin` and `Referer` become `localhost:<port>`, and
+  proxy headers (`X-Forwarded-*`, Tailscale's identity headers) are dropped, so host checks (Vite's
+  `allowedHosts`, webpack-dev-server, Next.js server actions) pass. Back to the browser: `X-Frame-Options` and
+  `frame-ancestors` go (replaced by one that allows only PocketIDE), redirects to `localhost` become relative,
+  and cookies lose `Domain=localhost`. Bodies are passed through, except pages (asked for uncompressed), which
+  get a small script at the start of `<head>` for console forwarding, the address bar and Back/Forward/Reload.
+- **`tailscale serve` calls run one at a time**: each one reads the whole serve config, changes it and writes it
+  back, so two at once lose one change (found while testing: cleaning up three entries at once left one).
+- **Hard reload** answers with `Clear-Site-Data: "cache"` for the preview's origin, then loads the page again:
+  an iframe can't do a cache-bypassing reload any other way.
 - Dark theme only. No service worker yet; it comes with offline handling and notifications in milestone 7.
 
 ## Roadmap
@@ -271,7 +328,7 @@ Layout: `agent/` is the Node.js server (plain `node:http` + `ws`). `client/` is 
 2. ✅ File browser + editor (live sync with changes on disk)
 3. ✅ Terminal (persistent sessions with exact screen restore, extra key row, works with Claude Code)
 4. ✅ Process manager, logs, Run/Stop/Restart, `pocketide.json`
-5. Web preview via reverse proxy (with HMR)
+5. ✅ Web preview via reverse proxy (with HMR)
 6. Desktop window capture + window-scoped input (plus the Windows Defender exclusion notes)
 7. Polish: reconnection, performance, landscape split view, notifications, autostart via Task Scheduler
 
